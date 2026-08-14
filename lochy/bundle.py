@@ -35,8 +35,8 @@ class Bundle:
 
 def _session_to_json(session: BundleSession) -> dict[str, Any]:
     record: dict[str, Any] = {"sessionId": session.session_id, "cwd": session.cwd}
-    # Absent rather than null, so bundles stay byte-comparable with the ones
-    # the TypeScript implementation wrote (JSON.stringify drops undefined).
+    # Omitted rather than null: the ref is a hash of these bytes, so the
+    # encoding of "unknown" has to stay stable or identical sessions diverge.
     if session.git_branch is not None:
         record["gitBranch"] = session.git_branch
     if session.claude_version is not None:

@@ -28,8 +28,8 @@ def home_dir() -> str:
 
 
 def iso_timestamp(seconds: float) -> str:
-    """Millisecond-precision UTC with a Z suffix, matching what the
-    TypeScript implementation wrote into bundles."""
+    """Millisecond-precision UTC with a Z suffix, as the bundle format
+    stores timestamps."""
     moment = datetime.fromtimestamp(seconds, tz=timezone.utc)
     return f"{moment.strftime('%Y-%m-%dT%H:%M:%S')}.{moment.microsecond // 1000:03d}Z"
 

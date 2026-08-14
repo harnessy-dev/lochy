@@ -19,7 +19,7 @@ def test_rewrites_the_cwd_field_and_paths_inside_tool_results() -> None:
         [
             dumps({"type": "user", "cwd": "/Users/mike/proj", "gitBranch": "main"}),
             dumps(
-                {"type": "assistant", "toolUseResult": "read /Users/mike/proj/src/a.ts"}
+                {"type": "assistant", "toolUseResult": "read /Users/mike/proj/src/a.py"}
             ),
         ]
     )
@@ -27,7 +27,7 @@ def test_rewrites_the_cwd_field_and_paths_inside_tool_results() -> None:
     out = rewrite_transcript(raw, CROSS_MACHINE)
 
     assert '"cwd":"/Users/alice/work/proj"' in out
-    assert "/Users/alice/work/proj/src/a.ts" in out
+    assert "/Users/alice/work/proj/src/a.py" in out
     assert "/Users/mike" not in out
 
 
@@ -89,5 +89,5 @@ def test_residual_reports_nothing_when_the_rewrite_was_complete() -> None:
 
 def test_residual_reports_origin_paths_that_survived() -> None:
     assert residual_origin_paths(
-        "stale /Users/mike/elsewhere/file.ts", CROSS_MACHINE
+        "stale /Users/mike/elsewhere/file.py", CROSS_MACHINE
     ) == ["/Users/mike"]

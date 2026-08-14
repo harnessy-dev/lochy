@@ -85,8 +85,7 @@ public API. Re-verify if something breaks.
 
 ## Layout
 
-Python 3.12, Poetry, boto3. Ported from an earlier TypeScript
-implementation; the CLI surface and bundle format are unchanged.
+Python 3.12, Poetry, boto3.
 
 ```
 lochy/
@@ -107,32 +106,25 @@ half-rewritten if the pairs were applied sequentially. Keep the
 single-pass property if you touch it — one alternation regex, one
 `re.sub`, never a loop of `str.replace` calls.
 
-Two smaller things the port has to keep doing, both for byte-compatibility
-with bundles the TypeScript build wrote: JSON is packed compactly
-(`separators=(",", ":")`, `ensure_ascii=False`), and absent session
-metadata is omitted rather than serialized as `null`.
-
-The gzip wrapper is not byte-identical to Node's — it differs in the OS
-header byte — so the same sessions packed by each implementation produce
-different refs. That only matters if bundles are ever produced by both.
-Packing is deterministic within this implementation (`mtime=0`).
+Two smaller things `bundle.py` has to keep doing, because the ref is a
+hash of the packed bytes and any drift changes a bundle's identity: JSON
+is packed compactly (`separators=(",", ":")`, `ensure_ascii=False`), and
+absent session metadata is omitted rather than serialized as `null`.
+Packing is deterministic (`mtime=0`), so the same sessions always
+produce the same ref.
 
 ## State
 
-Working and verified end to end, twice — once before the port and once
-after. Both times: a session was created on a feature branch, saved, its
-bundle rewritten to look like it came from a different machine (foreign
-home and repo path), restored into a different directory with the
-original deleted so there was no fallback, and resumed — it recalled
-content from the original conversation.
+Working and verified end to end: a session was created on a feature
+branch, saved, its bundle rewritten to look like it came from a
+different machine (foreign home and repo path), restored into a
+different directory with the original deleted so there was no fallback,
+and resumed — it recalled content from the original conversation.
 
-There was briefly a checked-in bundle written by the TypeScript build,
-asserted byte-identical on restore, to pin the inherited format. It was
-dropped: the TS implementation never produced a bundle that outlived it,
-so nothing in the wild needs reading, and the fixture's own bytes were
-the only thing left tying the repo to Node. The format constraints it
-guarded are the two noted above — compact separators and omitted-not-null
-metadata — which are now held by prose rather than by a test.
+Nothing currently pins the bundle format. The two constraints above —
+compact separators and omitted-not-null metadata — are held by prose
+rather than by a test, so a well-meaning refactor could change every
+ref the format produces without failing the suite.
 
 **The S3 backend has still never run against a real bucket.** It has moto
 coverage now, which is more than it had, but mocks agree with your
