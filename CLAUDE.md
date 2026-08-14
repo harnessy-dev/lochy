@@ -96,7 +96,6 @@ lochy/
 ├── rewrite.py   # path rewriting (the load-bearing logic)
 └── store.py     # Store interface + local-fs and S3-compatible backends
 test/
-├── fixtures/    # a bundle written by the TypeScript build, and its restore
 └── test_*.py    # one module per source module
 ```
 
@@ -127,10 +126,13 @@ home and repo path), restored into a different directory with the
 original deleted so there was no fallback, and resumed — it recalled
 content from the original conversation.
 
-The port is also pinned to the format it inherited. `test/fixtures` holds
-a bundle written by the TypeScript build and the transcript that build
-restored from it; the suite asserts the Python restore is byte-identical.
-Both are synthetic — do not regenerate them from a real session.
+There was briefly a checked-in bundle written by the TypeScript build,
+asserted byte-identical on restore, to pin the inherited format. It was
+dropped: the TS implementation never produced a bundle that outlived it,
+so nothing in the wild needs reading, and the fixture's own bytes were
+the only thing left tying the repo to Node. The format constraints it
+guarded are the two noted above — compact separators and omitted-not-null
+metadata — which are now held by prose rather than by a test.
 
 **The S3 backend has still never run against a real bucket.** It has moto
 coverage now, which is more than it had, but mocks agree with your
