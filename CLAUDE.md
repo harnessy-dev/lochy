@@ -66,7 +66,7 @@ public API. Re-verify if something breaks.
 
 - Sessions live at
   `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`.
-- The encoding is `cwd.replace(/[^a-zA-Z0-9]/g, '-')` — every
+- The encoding is `re.sub(r"[^a-zA-Z0-9]", "-", cwd)` — every
   non-alphanumeric character, not just slashes.
 - The cwd is **symlink-resolved first**, so `/tmp/x` is stored as
   `-private-tmp-x` on macOS. Missing this breaks lookups.
@@ -85,43 +85,72 @@ public API. Re-verify if something breaks.
 
 ## Layout
 
+Python 3.12, Poetry, boto3. Ported from an earlier TypeScript
+implementation; the CLI surface and bundle format are unchanged.
+
 ```
-src/
-├── cli.ts          # entry point, arg parsing, save/restore/list commands
-├── claude.ts       # Claude Code adapter: path encoding, session discovery, metadata
-├── bundle.ts       # bundle format, gzip, content-addressed ref
-├── rewrite.ts      # path rewriting (the load-bearing logic)
-├── store.ts        # Store interface + local-fs and S3-compatible backends
-└── rewrite.test.ts # rewrite tests
+sessionport/
+├── cli.py       # entry point, arg parsing, list/save/restore commands
+├── claude.py    # Claude Code adapter: path encoding, session discovery, metadata
+├── bundle.py    # bundle format, gzip, content-addressed ref
+├── rewrite.py   # path rewriting (the load-bearing logic)
+└── store.py     # Store interface + local-fs and S3-compatible backends
+test/
+├── fixtures/    # a bundle written by the TypeScript build, and its restore
+└── test_*.py    # one module per source module
 ```
 
-`rewrite.ts` is where correctness actually lives. It does a **single
+`rewrite.py` is where correctness actually lives. It does a **single
 left-to-right pass** with longest-match-first alternation, so a
 substitution's output can never be re-matched by a later pair. The hazard
 it guards against: a cwd nested under a home directory getting
 half-rewritten if the pairs were applied sequentially. Keep the
-single-pass property if you touch it.
+single-pass property if you touch it — one alternation regex, one
+`re.sub`, never a loop of `str.replace` calls.
+
+Two smaller things the port has to keep doing, both for byte-compatibility
+with bundles the TypeScript build wrote: JSON is packed compactly
+(`separators=(",", ":")`, `ensure_ascii=False`), and absent session
+metadata is omitted rather than serialized as `null`.
+
+The gzip wrapper is not byte-identical to Node's — it differs in the OS
+header byte — so the same sessions packed by each implementation produce
+different refs. That only matters if bundles are ever produced by both.
+Packing is deterministic within this implementation (`mtime=0`).
 
 ## State
 
-Working and verified end to end: a session was created on a feature
-branch, saved, its bundle rewritten to look like it came from a different
-machine (foreign home and repo path), restored into a different directory
-with the original deleted so there was no fallback, and resumed — it
-recalled content from the original conversation.
+Working and verified end to end, twice — once before the port and once
+after. Both times: a session was created on a feature branch, saved, its
+bundle rewritten to look like it came from a different machine (foreign
+home and repo path), restored into a different directory with the
+original deleted so there was no fallback, and resumed — it recalled
+content from the original conversation.
 
-Not yet verified: **the S3 backend has never run against a real bucket.**
-Only the filesystem backend has been exercised. Test against MinIO or a
-real bucket before trusting it.
+The port is also pinned to the format it inherited. `test/fixtures` holds
+a bundle written by the TypeScript build and the transcript that build
+restored from it; the suite asserts the Python restore is byte-identical.
+Both are synthetic — do not regenerate them from a real session.
 
-Also missing: any git integration (no notes, no PR-level pointers), no
-redaction of secrets in transcripts, no adapters beyond Claude Code, and
-no published package or remote.
+**The S3 backend has still never run against a real bucket.** It has moto
+coverage now, which is more than it had, but mocks agree with your
+assumptions by construction. A live run failed on `Access Denied` (the
+IAM user lacked `s3:PutObject`); the region mismatch that precedes that
+failure surfaces as "The bucket you are attempting to access must be
+addressed using the specified endpoint," so set `SESSIONPORT_S3_REGION`
+when the bucket's region differs from the AWS config default.
+
+Also missing: `delete`/`list` on the Store interface (a real gap, given
+deletability is the stated reason for choosing object storage), any git
+integration (no notes, no PR-level pointers), no redaction of secrets in
+transcripts, no adapters beyond Claude Code, and no published package or
+remote.
 
 ## Conventions
 
-- Verify before committing: `npm run typecheck`, `npm run build`, and
-  `npx vitest run`.
+- Verify before committing: `poetry run ruff check`,
+  `poetry run ruff format --check`, `poetry run mypy .`, and
+  `poetry run pytest`.
 - Commit coherent changes as you go rather than batching.
 - Don't add comments that restate the code. The comments that exist mark
   non-obvious constraints (the single-pass rewrite, the lazy SDK import,

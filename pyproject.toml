@@ -1,0 +1,44 @@
+[project]
+name = "sessionport"
+version = "0.1.0"
+description = "Save and restore agent coding sessions across machines"
+authors = [{ name = "Mike Lyons", email = "mdl0394@gmail.com" }]
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12,<3.13"
+dependencies = ["boto3 (>=1.37.31,<2.0.0)"]
+
+[project.scripts]
+sessionport = "sessionport.cli:main"
+
+[build-system]
+requires = ["poetry-core>=2.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry]
+packages = [{ include = "sessionport" }]
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.2.2"
+mypy = "^1.10.1"
+moto = "^5.0.11"
+ruff = "^0.11.2"
+boto3-stubs = "^1.34.145"
+mypy-boto3-s3 = "^1.34.105"
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+
+[tool.ruff]
+# Linting configuration
+line-length = 88
+target-version = "py312"
+lint.select = ["E", "F", "I"]
+lint.ignore = ["E501"]
+
+# Formatting configuration
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+docstring-code-format = true

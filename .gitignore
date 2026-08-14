@@ -1,4 +1,10 @@
-node_modules/
+.venv/
+__pycache__/
+*.pyc
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
 dist/
 *.spb
+!test/fixtures/*.spb
 .DS_Store

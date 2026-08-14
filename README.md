@@ -16,9 +16,13 @@ Currently supports Claude Code.
 ## Install
 
 ```sh
-npm install && npm run build
-npm link          # optional, puts `sessionport` on PATH
+poetry install
+poetry run sessionport --help
+
+pipx install .    # optional, puts `sessionport` on PATH
 ```
+
+Requires Python 3.12.
 
 ## Use
 
