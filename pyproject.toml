@@ -1,5 +1,5 @@
 [project]
-name = "sessionport"
+name = "lochy"
 version = "0.1.0"
 description = "Save and restore agent coding sessions across machines"
 authors = [{ name = "Mike Lyons", email = "mdl0394@gmail.com" }]
@@ -9,14 +9,14 @@ requires-python = ">=3.12,<3.13"
 dependencies = ["boto3 (>=1.37.31,<2.0.0)"]
 
 [project.scripts]
-sessionport = "sessionport.cli:main"
+lochy = "lochy.cli:main"
 
 [build-system]
 requires = ["poetry-core>=2.0.0"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
-packages = [{ include = "sessionport" }]
+packages = [{ include = "lochy" }]
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.2.2"

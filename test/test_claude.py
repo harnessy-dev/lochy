@@ -2,7 +2,7 @@ import json
 import os
 from pathlib import Path
 
-from sessionport.claude import (
+from lochy.claude import (
     encode_cwd,
     encode_path,
     list_sessions,

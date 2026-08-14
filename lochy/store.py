@@ -8,7 +8,7 @@ from urllib.parse import unquote, urlparse
 if TYPE_CHECKING:
     from mypy_boto3_s3.client import S3Client
 
-DEFAULT_STORE = os.path.join(str(Path.home()), ".sessionport", "store")
+DEFAULT_STORE = os.path.join(str(Path.home()), ".lochy", "store")
 
 
 class Store(ABC):
@@ -54,8 +54,8 @@ class S3Store(Store):
         import boto3
         from botocore.config import Config
 
-        endpoint = os.environ.get("SESSIONPORT_S3_ENDPOINT")
-        region = os.environ.get("SESSIONPORT_S3_REGION")
+        endpoint = os.environ.get("LOCHY_S3_ENDPOINT")
+        region = os.environ.get("LOCHY_S3_REGION")
         return boto3.client(
             "s3",
             endpoint_url=endpoint,
@@ -101,4 +101,4 @@ def create_store(uri: str) -> Store:
 def resolve_store_uri(explicit: str | None = None) -> str:
     if explicit is not None:
         return explicit
-    return os.environ.get("SESSIONPORT_STORE", DEFAULT_STORE)
+    return os.environ.get("LOCHY_STORE", DEFAULT_STORE)

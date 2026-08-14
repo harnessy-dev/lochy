@@ -1,6 +1,6 @@
 import json
 
-from sessionport.rewrite import RewriteSpec, residual_origin_paths, rewrite_transcript
+from lochy.rewrite import RewriteSpec, residual_origin_paths, rewrite_transcript
 
 CROSS_MACHINE = RewriteSpec(
     origin_cwd="/Users/mike/proj",

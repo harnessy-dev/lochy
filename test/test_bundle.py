@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from sessionport.bundle import (
+from lochy.bundle import (
     Bundle,
     BundleOrigin,
     BundleSession,
@@ -10,7 +10,7 @@ from sessionport.bundle import (
     pack_bundle,
     unpack_bundle,
 )
-from sessionport.rewrite import RewriteSpec, rewrite_transcript
+from lochy.rewrite import RewriteSpec, rewrite_transcript
 
 FIXTURES = Path(__file__).parent / "fixtures"
 TS_REF = "39200e4051294da38a5e6dff17cf8144e3013245ba42afd9f470cbeb794b6fd2"
@@ -24,7 +24,7 @@ TARGET_CWD = "/private/tmp/sp-fixture/target-home/work/proj"
 
 
 def ts_bundle_bytes() -> bytes:
-    return (FIXTURES / f"{TS_REF}.spb").read_bytes()
+    return (FIXTURES / f"{TS_REF}.loch").read_bytes()
 
 
 def test_reads_a_bundle_written_by_the_typescript_implementation() -> None:

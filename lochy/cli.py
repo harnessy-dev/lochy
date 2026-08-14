@@ -30,26 +30,26 @@ from .claude import (
 from .rewrite import RewriteSpec, residual_origin_paths, rewrite_transcript
 from .store import create_store, resolve_store_uri
 
-USAGE = """sessionport — save and restore agent coding sessions across machines
+USAGE = """lochy — save and restore agent coding sessions across machines
 
 Usage:
-  sessionport list    [--cwd <path>] [--branch <name>]
-  sessionport save    [--cwd <path>] [--branch <name>] [--session <id>] [--store <uri>]
-  sessionport restore <ref> [--into <path>] [--store <uri>] [--force] [--new-id]
+  lochy list    [--cwd <path>] [--branch <name>]
+  lochy save    [--cwd <path>] [--branch <name>] [--session <id>] [--store <uri>]
+  lochy restore <ref> [--into <path>] [--store <uri>] [--force] [--new-id]
 
 Stores:
   <path>              local directory
   s3://bucket/prefix  any S3-compatible endpoint
 
 Environment:
-  SESSIONPORT_STORE        default store URI
-  SESSIONPORT_S3_ENDPOINT  custom endpoint (R2, MinIO, ...)
-  SESSIONPORT_S3_REGION    region override
+  LOCHY_STORE        default store URI
+  LOCHY_S3_ENDPOINT  custom endpoint (R2, MinIO, ...)
+  LOCHY_S3_REGION    region override
 """
 
 
 def fail(message: str) -> NoReturn:
-    sys.stderr.write(f"sessionport: {message}\n")
+    sys.stderr.write(f"lochy: {message}\n")
     raise SystemExit(1)
 
 
@@ -78,7 +78,7 @@ def collect(
 
 
 def _parser(command: str) -> argparse.ArgumentParser:
-    return argparse.ArgumentParser(prog=f"sessionport {command}")
+    return argparse.ArgumentParser(prog=f"lochy {command}")
 
 
 def command_list(argv: list[str]) -> None:
@@ -132,7 +132,7 @@ def command_save(argv: list[str]) -> None:
     packed = pack_bundle(bundle)
     ref = bundle_ref(packed)
     store = create_store(resolve_store_uri(args.store))
-    store.put(f"{ref}.spb", packed)
+    store.put(f"{ref}.loch", packed)
 
     for session in bundle.sessions:
         sys.stdout.write(
@@ -156,7 +156,7 @@ def command_restore(argv: list[str]) -> None:
 
     store = create_store(resolve_store_uri(args.store))
     try:
-        bundle = unpack_bundle(store.get(f"{args.ref}.spb"))
+        bundle = unpack_bundle(store.get(f"{args.ref}.loch"))
     except Exception as error:
         fail(f"could not read {args.ref} from {store.describe()}: {error}")
 
@@ -227,7 +227,7 @@ def main() -> None:
     elif command in ("help", "--help", "-h", None):
         sys.stdout.write(USAGE)
     else:
-        fail(f"unknown command '{command}' (try: sessionport help)")
+        fail(f"unknown command '{command}' (try: lochy help)")
 
 
 if __name__ == "__main__":

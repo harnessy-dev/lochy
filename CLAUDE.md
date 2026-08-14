@@ -1,11 +1,11 @@
-# sessionport — repo overview for Claude
+# lochy — repo overview for Claude
 
 ## What this is
 
 A standalone CLI that makes agent coding sessions portable between
 machines. Agent CLIs store transcripts in machine-local directories keyed
 by the working directory they ran in, which strands a session on the
-laptop that produced it. `sessionport` packs those transcripts into a
+laptop that produced it. `lochy` packs those transcripts into a
 content-addressed bundle, stores it anywhere S3-compatible, and unpacks
 it elsewhere with paths rewritten so the session actually resumes.
 
@@ -89,7 +89,7 @@ Python 3.12, Poetry, boto3. Ported from an earlier TypeScript
 implementation; the CLI surface and bundle format are unchanged.
 
 ```
-sessionport/
+lochy/
 ├── cli.py       # entry point, arg parsing, list/save/restore commands
 ├── claude.py    # Claude Code adapter: path encoding, session discovery, metadata
 ├── bundle.py    # bundle format, gzip, content-addressed ref
@@ -137,7 +137,7 @@ coverage now, which is more than it had, but mocks agree with your
 assumptions by construction. A live run failed on `Access Denied` (the
 IAM user lacked `s3:PutObject`); the region mismatch that precedes that
 failure surfaces as "The bucket you are attempting to access must be
-addressed using the specified endpoint," so set `SESSIONPORT_S3_REGION`
+addressed using the specified endpoint," so set `LOCHY_S3_REGION`
 when the bucket's region differs from the AWS config default.
 
 Also missing: `delete`/`list` on the Store interface (a real gap, given

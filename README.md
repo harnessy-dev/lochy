@@ -1,4 +1,4 @@
-# sessionport
+# lochy
 
 Save and restore agent coding sessions across machines.
 
@@ -7,7 +7,7 @@ working directory they ran in. That makes a session effectively stuck to the
 laptop that produced it — you can't hand a teammate the conversation that
 produced a branch, and you can't pick one up on another machine.
 
-`sessionport` packs those transcripts into a portable, content-addressed
+`lochy` packs those transcripts into a portable, content-addressed
 bundle, stores it anywhere S3-compatible, and unpacks it on another machine
 with the paths rewritten so the session actually resumes.
 
@@ -17,9 +17,9 @@ Currently supports Claude Code.
 
 ```sh
 poetry install
-poetry run sessionport --help
+poetry run lochy --help
 
-pipx install .    # optional, puts `sessionport` on PATH
+pipx install .    # optional, puts `lochy` on PATH
 ```
 
 Requires Python 3.12.
@@ -28,15 +28,15 @@ Requires Python 3.12.
 
 ```sh
 # what's on this machine for the current repo?
-sessionport list
-sessionport list --branch feature/checkout-flow
+lochy list
+lochy list --branch feature/checkout-flow
 
 # pack them up and push to a store
-sessionport save --branch feature/checkout-flow --store s3://my-bucket/sessions
+lochy save --branch feature/checkout-flow --store s3://my-bucket/sessions
 # -> ref 10482276de745032...
 
 # on another machine, in a checkout of the same branch
-sessionport restore 10482276de745032... --store s3://my-bucket/sessions
+lochy restore 10482276de745032... --store s3://my-bucket/sessions
 # -> cd /path/to/repo && claude --resume e71cdcb1-7c2c-410b-8c73-91cdf0cba4b8
 ```
 
@@ -52,9 +52,9 @@ sessions produces a single ref.
 
 | Variable | Purpose |
 | --- | --- |
-| `SESSIONPORT_STORE` | default store URI (else `~/.sessionport/store`) |
-| `SESSIONPORT_S3_ENDPOINT` | custom endpoint for R2, MinIO, Backblaze, ... |
-| `SESSIONPORT_S3_REGION` | region override |
+| `LOCHY_STORE` | default store URI (else `~/.lochy/store`) |
+| `LOCHY_S3_ENDPOINT` | custom endpoint for R2, MinIO, Backblaze, ... |
+| `LOCHY_S3_REGION` | region override |
 
 Credentials come from the standard AWS chain, so `AWS_ACCESS_KEY_ID` /
 `AWS_SECRET_ACCESS_KEY`, a shared profile, or an instance role all work.

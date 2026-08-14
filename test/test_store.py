@@ -5,7 +5,7 @@ import boto3
 import pytest
 from moto import mock_aws
 
-from sessionport.store import (
+from lochy.store import (
     DEFAULT_STORE,
     FileStore,
     S3Store,
@@ -19,14 +19,14 @@ def aws_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
     monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
-    monkeypatch.delenv("SESSIONPORT_S3_ENDPOINT", raising=False)
-    monkeypatch.delenv("SESSIONPORT_S3_REGION", raising=False)
+    monkeypatch.delenv("LOCHY_S3_ENDPOINT", raising=False)
+    monkeypatch.delenv("LOCHY_S3_REGION", raising=False)
 
 
 def test_file_store_round_trips(tmp_path: Path) -> None:
     store = FileStore(str(tmp_path / "store"))
-    store.put("abc.spb", b"payload")
-    assert store.get("abc.spb") == b"payload"
+    store.put("abc.loch", b"payload")
+    assert store.get("abc.loch") == b"payload"
     assert store.describe() == str(tmp_path / "store")
 
 
@@ -49,9 +49,9 @@ def test_create_store_rejects_a_bucketless_s3_uri() -> None:
 def test_resolve_store_uri_prefers_explicit_then_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("SESSIONPORT_STORE", raising=False)
+    monkeypatch.delenv("LOCHY_STORE", raising=False)
     assert resolve_store_uri() == DEFAULT_STORE
-    monkeypatch.setenv("SESSIONPORT_STORE", "s3://from-env/x")
+    monkeypatch.setenv("LOCHY_STORE", "s3://from-env/x")
     assert resolve_store_uri() == "s3://from-env/x"
     assert resolve_store_uri("/explicit") == "/explicit"
 
@@ -61,11 +61,11 @@ def test_s3_store_round_trips(aws_credentials: None) -> None:
     boto3.client("s3", region_name="us-east-1").create_bucket(Bucket="sessions")
 
     store = S3Store("sessions", "bundles")
-    store.put("abc.spb", b"payload")
+    store.put("abc.loch", b"payload")
 
-    assert store.get("abc.spb") == b"payload"
+    assert store.get("abc.loch") == b"payload"
     stored = boto3.client("s3", region_name="us-east-1").get_object(
-        Bucket="sessions", Key="bundles/abc.spb"
+        Bucket="sessions", Key="bundles/abc.loch"
     )
     assert stored["ContentType"] == "application/gzip"
 
@@ -75,24 +75,24 @@ def test_s3_store_without_a_prefix(aws_credentials: None) -> None:
     boto3.client("s3", region_name="us-east-1").create_bucket(Bucket="sessions")
 
     store = S3Store("sessions", "")
-    store.put("abc.spb", b"payload")
+    store.put("abc.loch", b"payload")
 
     stored = boto3.client("s3", region_name="us-east-1").list_objects_v2(
         Bucket="sessions"
     )
-    assert [item["Key"] for item in stored["Contents"]] == ["abc.spb"]
+    assert [item["Key"] for item in stored["Contents"]] == ["abc.loch"]
 
 
 @mock_aws
 def test_s3_store_honours_the_region_override(
     aws_credentials: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("SESSIONPORT_S3_REGION", "us-east-2")
+    monkeypatch.setenv("LOCHY_S3_REGION", "us-east-2")
     boto3.client("s3", region_name="us-east-2").create_bucket(
         Bucket="sessions",
         CreateBucketConfiguration={"LocationConstraint": "us-east-2"},
     )
 
     store = S3Store("sessions", "")
-    store.put("abc.spb", b"payload")
-    assert store.get("abc.spb") == b"payload"
+    store.put("abc.loch", b"payload")
+    assert store.get("abc.loch") == b"payload"

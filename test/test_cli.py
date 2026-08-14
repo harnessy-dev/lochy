@@ -5,8 +5,8 @@ from pathlib import Path
 import pytest
 from test_claude import write_session
 
-from sessionport.claude import session_dir_for, transcript_path_for
-from sessionport.cli import main
+from lochy.claude import session_dir_for, transcript_path_for
+from lochy.cli import main
 
 
 def invoke(
@@ -16,7 +16,7 @@ def invoke(
     *argv: str,
 ) -> tuple[str, str, int | None]:
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setattr("sys.argv", ["sessionport", *argv])
+    monkeypatch.setattr("sys.argv", ["lochy", *argv])
     code: int | None = None
     try:
         main()
@@ -30,7 +30,7 @@ def test_help_is_printed_without_a_command(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
     out, _, code = invoke(monkeypatch, capsys, tmp_path)
-    assert out.startswith("sessionport — save and restore")
+    assert out.startswith("lochy — save and restore")
     assert code is None
 
 
@@ -38,7 +38,7 @@ def test_unknown_command_fails(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
     _, err, code = invoke(monkeypatch, capsys, tmp_path, "bogus")
-    assert err == "sessionport: unknown command 'bogus' (try: sessionport help)\n"
+    assert err == "lochy: unknown command 'bogus' (try: lochy help)\n"
     assert code == 1
 
 
@@ -107,7 +107,7 @@ def test_save_then_restore_onto_another_machine(
     assert "packed abc [main]" in out
     ref = re.search(r"^ref ([0-9a-f]{64})$", out, re.M)
     assert ref is not None
-    assert (store / f"{ref.group(1)}.spb").exists()
+    assert (store / f"{ref.group(1)}.loch").exists()
 
     target_home = tmp_path / "target-home"
     target_project = tmp_path / "target" / "work" / "proj"
@@ -162,7 +162,7 @@ def test_restore_skips_an_existing_session_unless_forced(
         str(store),
     )
     assert "skipped abc (already exists; --force to overwrite)" in err
-    assert err.endswith("sessionport: nothing restored\n")
+    assert err.endswith("lochy: nothing restored\n")
     assert code == 1
 
     out, _, _ = invoke(
@@ -228,7 +228,7 @@ def test_save_fails_when_nothing_matches(
         "--store",
         str(tmp_path / "store"),
     )
-    assert err.startswith("sessionport: no claude-code sessions found for")
+    assert err.startswith("lochy: no claude-code sessions found for")
     assert code == 1
 
 
@@ -236,7 +236,7 @@ def test_restore_requires_a_ref(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
     _, err, code = invoke(monkeypatch, capsys, tmp_path, "restore")
-    assert err == "sessionport: restore requires a bundle ref\n"
+    assert err == "lochy: restore requires a bundle ref\n"
     assert code == 1
 
 
@@ -246,5 +246,5 @@ def test_restore_reports_an_unreadable_ref(
     _, err, code = invoke(
         monkeypatch, capsys, tmp_path, "restore", "deadbeef", "--store", str(tmp_path)
     )
-    assert err.startswith("sessionport: could not read deadbeef from")
+    assert err.startswith("lochy: could not read deadbeef from")
     assert code == 1

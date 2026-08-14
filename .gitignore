@@ -5,6 +5,6 @@ __pycache__/
 .ruff_cache/
 .pytest_cache/
 dist/
-*.spb
-!test/fixtures/*.spb
+*.loch
+!test/fixtures/*.loch
 .DS_Store
