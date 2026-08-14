@@ -92,6 +92,7 @@ lochy/
 ├── cli.py       # entry point, arg parsing, list/save/restore commands
 ├── claude.py    # Claude Code adapter: path encoding, session discovery, metadata
 ├── bundle.py    # bundle format, gzip, content-addressed ref
+├── redact.py    # secret scrubbing, applied on save before packing
 ├── rewrite.py   # path rewriting (the load-bearing logic)
 └── store.py     # Store interface + local-fs and S3-compatible backends
 test/
@@ -105,6 +106,48 @@ it guards against: a cwd nested under a home directory getting
 half-rewritten if the pairs were applied sequentially. Keep the
 single-pass property if you touch it — one alternation regex, one
 `re.sub`, never a loop of `str.replace` calls.
+
+`redact.py` scrubs secrets out of a transcript on `save`, before packing.
+It is **best-effort pattern matching and nothing more.** It finds
+credentials with distinctive structure (AWS/GitHub/Slack/Stripe/
+Anthropic/OpenAI/Google keys, JWTs, PEM blocks) plus one context rule for
+`UPPERCASE_NAME=value`, which is the only way to catch an AWS secret
+access key — 40 chars of base64 with no prefix. It will miss anything
+shaped like ordinary text, and lowercase JSON keys such as
+`"api_key": "..."` are deliberately out of scope because matching them
+fires on prose. **A redacted bundle is not a safe bundle: rotate any
+credential an agent has read.** The rules stay narrow on purpose — a
+scrubber that mangles prose is one people disable. No entropy heuristics;
+they fire on every hash, UUID, and base64 blob in a transcript.
+
+Three properties it has to keep:
+
+- **The local transcript is never modified.** `cli.py` reads, redacts the
+  in-memory copy, packs that. Redaction changes the packed bytes and
+  therefore the ref; that is correct, the redacted bundle is the artifact.
+- **Single pass, same discipline as `rewrite.py`** — one alternation of
+  named groups, one `re.sub` — so no rule can match inside another rule's
+  replacement. The `env-assignment` value carries a `(?!\[REDACTED:)`
+  lookahead for the same reason: without it, re-scanning
+  `TOKEN=[REDACTED:env-assignment]` matches all over again.
+- **Redacted output is re-scanned, and a surviving match aborts the
+  save.** A rule that doesn't remove what it matched is a leak, so it
+  fails loudly instead of uploading. Two related constraints: the
+  replacement token holds no quote, backslash, or newline, so a JSONL
+  line still parses; and the PEM rule (the only multi-line one) excludes
+  `"` from its body so a BEGIN and an END in two different records can't
+  merge into one match that swallows everything between them.
+
+Counts are reported per session by rule name. **Never print the match**,
+not even truncated — `save`'s stdout lands in the next agent's transcript.
+
+Measured against 350MB of real transcripts: 37 matches, all from
+`env-assignment` and all of them source code naming a secret rather than
+a literal secret (`HARNESS_TOKEN: process.env.X`,
+`RPC_TOKEN_TTL = timedelta(...)`). Distinguishing a reference from a
+value needs a parser, so that failure mode stays — it mangles a line of
+code in the packed copy, it doesn't leak. The prefixed-key rules match
+nothing in that corpus, which is the point of the word boundaries.
 
 Two smaller things `bundle.py` has to keep doing, because the ref is a
 hash of the packed bytes and any drift changes a bundle's identity: JSON
@@ -134,11 +177,15 @@ failure surfaces as "The bucket you are attempting to access must be
 addressed using the specified endpoint," so set `LOCHY_S3_REGION`
 when the bucket's region differs from the AWS config default.
 
+Redaction on `save` is in and on by default, with no opt-out flag — if
+verbatim bundles turn out to be needed, add one deliberately. Its
+recall is untested against a real leak: the corpus it was measured on
+contained no live credential to catch.
+
 Also missing: `delete`/`list` on the Store interface (a real gap, given
 deletability is the stated reason for choosing object storage), any git
-integration (no notes, no PR-level pointers), no redaction of secrets in
-transcripts, no adapters beyond Claude Code, and no published package or
-remote.
+integration (no notes, no PR-level pointers), no adapters beyond Claude
+Code, and no published package or remote.
 
 ## Conventions
 

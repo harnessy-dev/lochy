@@ -27,6 +27,7 @@ from .claude import (
     resolve_cwd,
     transcript_path_for,
 )
+from .redact import RedactionError, redact, summarize
 from .rewrite import RewriteSpec, residual_origin_paths, rewrite_transcript
 from .store import create_store, resolve_store_uri
 
@@ -109,6 +110,26 @@ def command_save(argv: list[str]) -> None:
     if not sessions:
         fail(f"no {AGENT} sessions found for {cwd}")
 
+    packed_sessions: list[BundleSession] = []
+    redaction_notes: list[str] = []
+    for meta in sessions:
+        # In memory only — the agent's own transcript on disk stays verbatim.
+        try:
+            scrubbed = redact(Path(meta.path).read_text(encoding="utf-8"))
+        except RedactionError as error:
+            fail(f"refusing to pack {meta.session_id}: {error}")
+        packed_sessions.append(
+            BundleSession(
+                session_id=meta.session_id,
+                cwd=meta.cwd,
+                git_branch=meta.git_branch,
+                claude_version=meta.claude_version,
+                modified_at=meta.modified_at,
+                transcript=scrubbed.text,
+            )
+        )
+        redaction_notes.append(summarize(scrubbed.counts))
+
     bundle = Bundle(
         version=BUNDLE_VERSION,
         agent=AGENT,
@@ -116,17 +137,7 @@ def command_save(argv: list[str]) -> None:
         origin=BundleOrigin(
             home=home_dir(), platform=_platform_name(), hostname=socket.gethostname()
         ),
-        sessions=[
-            BundleSession(
-                session_id=meta.session_id,
-                cwd=meta.cwd,
-                git_branch=meta.git_branch,
-                claude_version=meta.claude_version,
-                modified_at=meta.modified_at,
-                transcript=Path(meta.path).read_text(encoding="utf-8"),
-            )
-            for meta in sessions
-        ],
+        sessions=packed_sessions,
     )
 
     packed = pack_bundle(bundle)
@@ -134,9 +145,10 @@ def command_save(argv: list[str]) -> None:
     store = create_store(resolve_store_uri(args.store))
     store.put(f"{ref}.loch", packed)
 
-    for session in bundle.sessions:
+    for session, redacted in zip(bundle.sessions, redaction_notes):
+        note = f" — {redacted}" if redacted else ""
         sys.stdout.write(
-            f"  packed {session.session_id} [{session.git_branch or 'no branch'}]\n"
+            f"  packed {session.session_id} [{session.git_branch or 'no branch'}]{note}\n"
         )
     sys.stdout.write(f"\nstored {format_bytes(len(packed))} in {store.describe()}\n")
     sys.stdout.write(f"ref {ref}\n")

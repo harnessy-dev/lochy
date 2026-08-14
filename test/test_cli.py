@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from test_claude import write_session
 
+from lochy.bundle import unpack_bundle
 from lochy.claude import session_dir_for, transcript_path_for
 from lochy.cli import main
 
@@ -133,6 +134,33 @@ def test_save_then_restore_onto_another_machine(
     assert str(origin_project.resolve()) not in body
     assert str(origin_home) not in body
     assert str(target_home / "note.txt") in body
+
+
+def test_save_redacts_secrets_without_touching_the_local_transcript(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "proj"
+    project.mkdir()
+    store = tmp_path / "store"
+    secret = "AKIAZZZZZZZZEXAMPLE0"
+    session_path = write_session(
+        home, str(project), "abc", summary=f"ran env, saw {secret}"
+    )
+
+    out, _, _ = invoke(
+        monkeypatch, capsys, home, "save", "--cwd", str(project), "--store", str(store)
+    )
+
+    assert "redacted 1 secret (aws-access-key ×1)" in out
+    assert secret not in out
+    assert secret in session_path.read_text(encoding="utf-8")
+
+    ref = re.search(r"^ref ([0-9a-f]{64})$", out, re.M)
+    assert ref is not None
+    bundle = unpack_bundle((store / f"{ref.group(1)}.loch").read_bytes())
+    assert secret not in bundle.sessions[0].transcript
+    assert "[REDACTED:aws-access-key]" in bundle.sessions[0].transcript
 
 
 def test_restore_skips_an_existing_session_unless_forced(
