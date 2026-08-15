@@ -11,6 +11,12 @@ if TYPE_CHECKING:
 DEFAULT_STORE = os.path.join(str(Path.home()), ".lochy", "store")
 
 
+class MissingObject(Exception):
+    """The store answered and the object isn't there. Distinct from a store
+    that didn't answer at all: one is terminal, the other worth retrying, and
+    a caller has to be able to tell them apart."""
+
+
 class Store(ABC):
     @abstractmethod
     def describe(self) -> str: ...
@@ -43,7 +49,10 @@ class FileStore(Store):
         path.write_bytes(data)
 
     def get(self, key: str) -> bytes:
-        return (Path(self._root) / key).read_bytes()
+        try:
+            return (Path(self._root) / key).read_bytes()
+        except FileNotFoundError as error:
+            raise MissingObject(f"no object at {key}") from error
 
     def list(self, prefix: str) -> list[str]:
         root = Path(self._root)
@@ -100,9 +109,18 @@ class S3Store(Store):
         )
 
     def get(self, key: str) -> bytes:
-        response = self._client().get_object(
-            Bucket=self._bucket, Key=self._key_for(key)
-        )
+        from botocore.exceptions import ClientError
+
+        try:
+            response = self._client().get_object(
+                Bucket=self._bucket, Key=self._key_for(key)
+            )
+        except ClientError as error:
+            # A missing bucket stays a plain ClientError: it means the store
+            # is misconfigured, not that this one object was deleted.
+            if error.response.get("Error", {}).get("Code") in ("NoSuchKey", "404"):
+                raise MissingObject(f"no object at {key}") from error
+            raise
         body = response.get("Body")
         if body is None:
             raise ValueError(f"empty object at {self._key_for(key)}")

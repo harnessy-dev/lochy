@@ -106,6 +106,7 @@ lochy/
 ├── bundle.py    # bundle format, gzip, content-addressed ref
 ├── index.py     # store key layout, derived index entries, delete and reindex
 ├── git.py       # current branch of a checkout, for the list default
+├── output.py    # result envelope, the two renderers, structured failures
 ├── redact.py    # secret scrubbing, applied on save before packing
 ├── rewrite.py   # path rewriting (the load-bearing logic)
 └── store.py     # Store interface + local-fs and S3-compatible backends
@@ -187,6 +188,14 @@ Three properties it has to keep:
 Counts are reported per session by rule name. **Never print the match**,
 not even truncated — `save`'s stdout lands in the next agent's transcript.
 
+`save` is not the only path transcript content escapes on, so `claude.py`
+scrubs the `list` summary too, in `_display_summary`. That summary is the
+first user message, it reaches a picker row and a pasted bug report without
+a `save` in between, and it is the only such field. Two ordering points:
+redact *before* truncating, since a cut can leave a secret's tail matching
+no rule; and a summary that raises `RedactionError` becomes `[REDACTED]`
+whole, because failing a listing over a label would be the wrong trade.
+
 Measured against 350MB of real transcripts: 37 matches, all from
 `env-assignment` and all of them source code naming a secret rather than
 a literal secret (`HARNESS_TOKEN: process.env.X`,
@@ -201,6 +210,87 @@ is packed compactly (`separators=(",", ":")`, `ensure_ascii=False`), and
 absent session metadata is omitted rather than serialized as `null`.
 Packing is deterministic (`mtime=0`), so the same sessions always
 produce the same ref.
+
+## The JSON contract
+
+`lochy` is meant to be embedded in other tools — Harness is the first — and
+a caller that scrapes prose breaks the moment someone rewords a sentence.
+So every command takes `--json`, accepted either before or after the
+subcommand, and answers with exactly one document on stdout:
+
+```json
+{"schema": 1, "ok": true, "command": "save", "ref": "...", "bytes": 331, ...}
+```
+
+`schema` is the envelope version. It exists so a consumer can detect a
+format change it doesn't understand; bump it when a field changes meaning or
+disappears, not when one is added.
+
+**Built once per command, rendered twice.** Each `command_*` returns a
+`Result` — the payload, the prose, and any stderr warnings — and `main()`
+hands it to one renderer or the other. No command contains `if args.json`,
+and that is the point: a payload assembled anywhere other than beside the
+prose that describes it will rot the first time someone edits the prose.
+
+**Failures are documents, on stdout.**
+
+```json
+{"schema": 1, "ok": false, "command": "restore", "code": "nothing-restored",
+ "error": "nothing restored", "sessions": [{"status": "skipped", ...}]}
+```
+
+Stdout rather than stderr so a caller parses one stream unconditionally and
+reads the verdict off the exit status and `ok`. Splitting the two across
+streams would force it to guess which stream to read before it knows which
+outcome it got. In JSON mode stderr stays empty, and the prose warnings
+(`restore`'s skips) are carried as per-item status instead.
+
+**`code` is the contract; `error` is for humans.** Reword a message freely,
+never a code. The set today:
+
+| code | meaning |
+| --- | --- |
+| `no-sessions` | `save` matched nothing |
+| `redaction-failed` | a secret survived redaction; nothing was uploaded |
+| `missing-ref` | `restore`/`delete` called without a ref |
+| `bundle-not-found` | the store answered and the ref isn't there |
+| `store-unreachable` | the store didn't answer |
+| `bundle-unreadable` | the bytes arrived and won't unpack |
+| `nothing-restored` | every session in the bundle was skipped |
+| `unknown-command` | no such subcommand |
+| `usage` | argparse rejected the arguments (exit status 2) |
+| `internal` | an unexpected exception |
+
+The first three are one failure to a human and three different affordances
+to a caller: retry, don't retry, report corruption. Telling them apart is
+why `store.py` raises a typed `MissingObject` — a bare `except Exception`
+around a store call can only produce the union. The `store_errors` block
+wraps the store call *alone*, since anything wider would relabel a bug in
+this process as a failure of the store.
+
+**Exactly one document per invocation, including the paths argparse owns.**
+argparse answers `-h` and a bad flag itself, writing prose and exiting
+before a command ever runs, so `_Parser` routes both back through `main()`.
+An unexpected exception becomes `code: "internal"` in JSON mode and stays a
+traceback without the flag, since a traceback is the most useful thing a
+human can get and the one thing a consumer can't parse.
+
+**Raw values, not renderings.** `format_bytes` and the fixed-width columns
+of `describe`/`describe_entry` belong to the text mode alone: the payload
+carries the integer and the ISO-8601 `...Z` timestamp. An empty result is
+`{"sessions": []}` with `ok: true`, never an error.
+
+The `list --remote` payload is deliberately *not* `index.py`'s stored entry
+shape even though the fields line up. One is a storage format, the other is
+a versioned wire contract, and they change for different reasons.
+
+**Never the matched text.** Redaction is reported as `{"<rule>": <count>}`
+plus a `redacted` total, exactly as much as the prose summary carries and no
+more — `save`'s stdout lands in the next agent's transcript. The one field
+holding transcript content is `list`'s `summary` (the first 120 characters of
+the first user message, which the text output already prints), and it is
+scrubbed in `claude.py` before it ever becomes a `SessionMeta`. It should
+stay the only such field.
 
 ## State
 
@@ -240,6 +330,15 @@ file store and moto. The old flat `<ref>.loch` layout was dropped without
 a migration: nothing had been stored in it beyond throwaway local
 bundles, since every S3 save so far failed on `Access Denied`.
 
+`--json` covers every command, including the empty results and every failure
+path, and the suite pins the two invariants a consumer actually leans on:
+stdout parses as a single document with nothing else in it, and a failing
+command still produces a parseable document with a nonzero exit status. The
+error taxonomy was reviewed by its first consumer, which is where the split
+between `bundle-not-found` and `store-unreachable` came from, but nothing has
+been wired up against it yet, so the field names have never survived contact
+with a real integration.
+
 Also missing: any other index dimension (`cwd` is the obvious next one,
 and the layout takes it without a migration), any git integration (no
 notes, no PR-level pointers), no adapters beyond Claude Code, and no
@@ -252,6 +351,11 @@ ref — the index makes refs discoverable, but nothing resolves a prefix.
   `poetry run ruff format --check`, `poetry run mypy .`, and
   `poetry run pytest`.
 - Commit coherent changes as you go rather than batching.
+- **Every command must be fully drivable by a program that never reads the
+  human text.** A new command isn't finished until `--json` covers it —
+  its result, its empty case, and its failures with a stable `code`. Build
+  the payload where the prose is built, never in an `if args.json` beside a
+  write call.
 - Don't add comments that restate the code. The comments that exist mark
   non-obvious constraints (the single-pass rewrite, the lazy SDK import,
   symlink resolution) — preserve or update those rather than deleting.

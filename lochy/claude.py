@@ -6,9 +6,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .redact import RedactionError, redact
+
 AGENT = "claude-code"
 
 METADATA_SCAN_LINES = 200
+
+SUMMARY_LIMIT = 120
 
 
 @dataclass(frozen=True)
@@ -75,14 +79,28 @@ def _extract_summary(record: dict[str, Any]) -> str | None:
     message = record.get("message")
     content = message.get("content") if isinstance(message, dict) else None
     if isinstance(content, str):
-        return content[:120]
+        return content
     if not isinstance(content, list):
         return None
     for block in content:
         text = block.get("text") if isinstance(block, dict) else None
         if isinstance(text, str) and text:
-            return text[:120]
+            return text
     return None
+
+
+def _display_summary(text: str | None) -> str | None:
+    """The one piece of transcript content that travels as metadata — onto a
+    picker row, into a pasted bug report — so it is scrubbed here rather than
+    at each renderer, and before truncation, since a cut can leave a secret's
+    tail matching no rule. A summary that won't come clean is dropped whole:
+    failing a listing over a label would be the wrong trade."""
+    if text is None:
+        return None
+    try:
+        return redact(text).text[:SUMMARY_LIMIT]
+    except RedactionError:
+        return "[REDACTED]"
 
 
 def read_session_meta(path: str) -> SessionMeta | None:
@@ -135,7 +153,7 @@ def read_session_meta(path: str) -> SessionMeta | None:
         claude_version=claude_version,
         bytes=stat.st_size,
         modified_at=iso_timestamp(stat.st_mtime),
-        summary=summary,
+        summary=_display_summary(summary),
     )
 
 

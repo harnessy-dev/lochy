@@ -6,8 +6,11 @@ import socket
 import sys
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import NoReturn
+from typing import Any, Callable, NoReturn
 
 from .bundle import (
     BUNDLE_VERSION,
@@ -35,13 +38,15 @@ from .index import (
     delete_bundle,
     dimension_prefix,
     index_bundle,
+    index_key,
     load_entries,
     reindex,
     value_prefix,
 )
+from .output import JSON_FLAG, CommandError, Result, emit, emit_error
 from .redact import RedactionError, redact, summarize
 from .rewrite import RewriteSpec, residual_origin_paths, rewrite_transcript
-from .store import create_store, resolve_store_uri
+from .store import MissingObject, create_store, resolve_store_uri
 
 USAGE = """lochy — save and restore agent coding sessions across machines
 
@@ -52,6 +57,9 @@ Usage:
   lochy restore <ref> [--into <path>] [--store <uri>] [--force] [--new-id]
   lochy delete  <ref> [--store <uri>]
   lochy reindex [--store <uri>]
+
+Every command takes --json, which replaces the text below with one machine-
+readable document on stdout.
 
 Stores:
   <path>              local directory
@@ -64,9 +72,22 @@ Environment:
 """
 
 
-def fail(message: str) -> NoReturn:
-    sys.stderr.write(f"lochy: {message}\n")
-    raise SystemExit(1)
+def fail(code: str, message: str) -> NoReturn:
+    raise CommandError(code, message)
+
+
+@contextmanager
+def store_errors(description: str) -> Iterator[None]:
+    """The two failures a caller can actually act on: an object that isn't
+    there is terminal, a store that didn't answer is worth retrying. Keep the
+    block around the store call alone — anything wider mislabels a bug in this
+    process as a failure of the store."""
+    try:
+        yield
+    except MissingObject as error:
+        fail("bundle-not-found", f"{description}: {error}")
+    except Exception as error:
+        fail("store-unreachable", f"{description}: {error}")
 
 
 def format_bytes(count: int) -> str:
@@ -103,11 +124,69 @@ def collect(
     return resolved, list_sessions(cwd=resolved, branch=branch, session_id=session)
 
 
+class HelpRequested(Exception):
+    def __init__(self, text: str) -> None:
+        super().__init__(text)
+        self.text = text
+
+
+class _Parser(argparse.ArgumentParser):
+    # argparse answers -h and a bad flag itself, writing prose and exiting
+    # before a command ever runs. Both are routed back to main() so that
+    # "one document per invocation" holds in JSON mode; the text each carries
+    # is argparse's own, so nothing changes without --json.
+    def error(self, message: str) -> NoReturn:
+        raise CommandError(
+            "usage",
+            message,
+            prose=f"{self.format_usage()}{self.prog}: error: {message}\n",
+            exit_status=2,
+        )
+
+    def print_help(self, file: Any = None) -> NoReturn:
+        raise HelpRequested(self.format_help())
+
+
 def _parser(command: str) -> argparse.ArgumentParser:
-    return argparse.ArgumentParser(prog=f"lochy {command}")
+    parser = _Parser(prog=f"lochy {command}")
+    # Registered so the flag parses after the subcommand; main() reads the mode
+    # off argv itself, because a failure before or during parsing has to render
+    # in the mode the caller asked for.
+    parser.add_argument(JSON_FLAG, action="store_true")
+    return parser
 
 
-def command_list(argv: list[str]) -> None:
+def _session_payload(meta: SessionMeta) -> dict[str, Any]:
+    return {
+        "sessionId": meta.session_id,
+        "path": meta.path,
+        "cwd": meta.cwd,
+        "branch": meta.git_branch,
+        "claudeVersion": meta.claude_version,
+        "bytes": meta.bytes,
+        "modifiedAt": meta.modified_at,
+        "summary": meta.summary,
+    }
+
+
+def _entry_payload(entry: IndexEntry) -> dict[str, Any]:
+    """Deliberately not index.py's stored shape: that one is a storage format,
+    this one is a versioned wire contract, and they change for different
+    reasons."""
+    return {
+        "ref": entry.ref,
+        "dimension": entry.dimension,
+        "value": entry.value,
+        "agent": entry.agent,
+        "createdAt": entry.created_at,
+        "bytes": entry.bytes,
+        "sessions": entry.sessions,
+        "cwd": entry.cwd,
+        "claudeVersion": entry.claude_version,
+    }
+
+
+def command_list(argv: list[str]) -> Result:
     parser = _parser("list")
     parser.add_argument("--cwd")
     parser.add_argument("--branch")
@@ -117,38 +196,69 @@ def command_list(argv: list[str]) -> None:
     args = parser.parse_args(argv)
 
     if args.remote or args.every or args.store is not None:
-        list_remote(args)
-        return
+        return list_remote(args)
 
     cwd, sessions = collect(args.cwd, args.branch)
+    return Result(
+        command="list",
+        payload={
+            "remote": False,
+            "cwd": cwd,
+            "branch": args.branch,
+            "sessions": [_session_payload(meta) for meta in sessions],
+        },
+        text=_list_text(cwd, sessions),
+    )
+
+
+def _list_text(cwd: str, sessions: list[SessionMeta]) -> str:
     if not sessions:
-        sys.stdout.write(f"no {AGENT} sessions found for {cwd}\n")
-        return
-
-    sys.stdout.write(f"{len(sessions)} session(s) for {cwd}\n")
-    for meta in sessions:
-        sys.stdout.write(f"  {describe(meta)}\n")
+        return f"no {AGENT} sessions found for {cwd}\n"
+    lines = [f"{len(sessions)} session(s) for {cwd}\n"]
+    lines += [f"  {describe(meta)}\n" for meta in sessions]
+    return "".join(lines)
 
 
-def list_remote(args: argparse.Namespace) -> None:
+def list_remote(args: argparse.Namespace) -> Result:
     store = create_store(resolve_store_uri(args.store))
     cwd = resolve_cwd(args.cwd if args.cwd is not None else os.getcwd())
     branch = args.branch if args.branch is not None else current_branch(cwd)
-    scope = "" if args.every else f" for [{branch or 'no branch'}]"
 
     prefix = dimension_prefix(BRANCH) if args.every else value_prefix(BRANCH, branch)
-    entries = load_entries(store, prefix)
-    if not entries:
-        sys.stdout.write(f"no bundles{scope} in {store.describe()}\n")
-        return
-
+    with store_errors(f"could not list {store.describe()}"):
+        entries = load_entries(store, prefix)
     refs = {entry.ref for entry in entries}
-    sys.stdout.write(f"{len(refs)} bundle(s){scope} in {store.describe()}\n")
-    for entry in entries:
-        sys.stdout.write(f"  {entry.ref}\n    {describe_entry(entry)}\n")
+
+    return Result(
+        command="list",
+        payload={
+            "remote": True,
+            "store": store.describe(),
+            "all": bool(args.every),
+            "branch": None if args.every else branch,
+            "bundles": len(refs),
+            "entries": [_entry_payload(entry) for entry in entries],
+        },
+        text=_list_remote_text(store.describe(), args.every, branch, entries, refs),
+    )
 
 
-def command_save(argv: list[str]) -> None:
+def _list_remote_text(
+    store: str,
+    every: bool,
+    branch: str | None,
+    entries: list[IndexEntry],
+    refs: set[str],
+) -> str:
+    scope = "" if every else f" for [{branch or 'no branch'}]"
+    if not entries:
+        return f"no bundles{scope} in {store}\n"
+    lines = [f"{len(refs)} bundle(s){scope} in {store}\n"]
+    lines += [f"  {entry.ref}\n    {describe_entry(entry)}\n" for entry in entries]
+    return "".join(lines)
+
+
+def command_save(argv: list[str]) -> Result:
     parser = _parser("save")
     parser.add_argument("--cwd")
     parser.add_argument("--branch")
@@ -158,16 +268,16 @@ def command_save(argv: list[str]) -> None:
 
     cwd, sessions = collect(args.cwd, args.branch, args.session)
     if not sessions:
-        fail(f"no {AGENT} sessions found for {cwd}")
+        fail("no-sessions", f"no {AGENT} sessions found for {cwd}")
 
     packed_sessions: list[BundleSession] = []
-    redaction_notes: list[str] = []
+    redactions: list[dict[str, int]] = []
     for meta in sessions:
         # In memory only — the agent's own transcript on disk stays verbatim.
         try:
             scrubbed = redact(Path(meta.path).read_text(encoding="utf-8"))
         except RedactionError as error:
-            fail(f"refusing to pack {meta.session_id}: {error}")
+            fail("redaction-failed", f"refusing to pack {meta.session_id}: {error}")
         packed_sessions.append(
             BundleSession(
                 session_id=meta.session_id,
@@ -178,7 +288,7 @@ def command_save(argv: list[str]) -> None:
                 transcript=scrubbed.text,
             )
         )
-        redaction_notes.append(summarize(scrubbed.counts))
+        redactions.append(scrubbed.counts)
 
     bundle = Bundle(
         version=BUNDLE_VERSION,
@@ -193,23 +303,82 @@ def command_save(argv: list[str]) -> None:
     packed = pack_bundle(bundle)
     ref = bundle_ref(packed)
     store = create_store(resolve_store_uri(args.store))
-    # Bundle first: an index entry is derived from it, so a pointer to a
-    # bundle that isn't there yet is the worse half of a failed save.
-    store.put(bundle_key(ref), packed)
-    entries = index_bundle(store, bundle, ref, len(packed))
+    with store_errors(f"could not write to {store.describe()}"):
+        # Bundle first: an index entry is derived from it, so a pointer to a
+        # bundle that isn't there yet is the worse half of a failed save.
+        store.put(bundle_key(ref), packed)
+        entries = index_bundle(store, bundle, ref, len(packed))
 
-    for session, redacted in zip(bundle.sessions, redaction_notes):
-        note = f" — {redacted}" if redacted else ""
-        sys.stdout.write(
+    return Result(
+        command="save",
+        payload={
+            "ref": ref,
+            "bytes": len(packed),
+            "store": store.describe(),
+            "cwd": cwd,
+            "createdAt": bundle.created_at,
+            # Counts by rule name only. The matched text never leaves this
+            # process: save's stdout lands in the next agent's transcript.
+            "redacted": sum(sum(counts.values()) for counts in redactions),
+            "sessions": [
+                {
+                    "sessionId": session.session_id,
+                    "branch": session.git_branch,
+                    "cwd": session.cwd,
+                    "claudeVersion": session.claude_version,
+                    "modifiedAt": session.modified_at,
+                    "redactions": counts,
+                }
+                for session, counts in zip(bundle.sessions, redactions)
+            ],
+            "indexed": [
+                {
+                    "dimension": entry.dimension,
+                    "value": entry.value,
+                    "key": index_key(entry.dimension, entry.value, entry.ref),
+                }
+                for entry in entries
+            ],
+        },
+        text=_save_text(
+            bundle, redactions, entries, store.describe(), len(packed), ref
+        ),
+    )
+
+
+def _save_text(
+    bundle: Bundle,
+    redactions: list[dict[str, int]],
+    entries: list[IndexEntry],
+    store: str,
+    size: int,
+    ref: str,
+) -> str:
+    lines = []
+    for session, counts in zip(bundle.sessions, redactions):
+        note = f" — {summarize(counts)}" if counts else ""
+        lines.append(
             f"  packed {session.session_id} [{session.git_branch or 'no branch'}]{note}\n"
         )
     indexed = ", ".join(f"[{entry.value or 'no branch'}]" for entry in entries)
-    sys.stdout.write(f"\nstored {format_bytes(len(packed))} in {store.describe()}\n")
-    sys.stdout.write(f"indexed under {indexed}\n")
-    sys.stdout.write(f"ref {ref}\n")
+    lines.append(f"\nstored {format_bytes(size)} in {store}\n")
+    lines.append(f"indexed under {indexed}\n")
+    lines.append(f"ref {ref}\n")
+    return "".join(lines)
 
 
-def command_restore(argv: list[str]) -> None:
+@dataclass(frozen=True)
+class RestoredSession:
+    session_id: str
+    origin_session_id: str
+    branch: str | None
+    status: str
+    path: str
+    residual_origin_paths: tuple[str, ...]
+    resume_command: str | None
+
+
+def command_restore(argv: list[str]) -> Result:
     parser = _parser("restore")
     parser.add_argument("ref", nargs="?")
     parser.add_argument("--into")
@@ -219,17 +388,21 @@ def command_restore(argv: list[str]) -> None:
     args = parser.parse_args(argv)
 
     if not args.ref:
-        fail("restore requires a bundle ref")
+        fail("missing-ref", "restore requires a bundle ref")
 
     store = create_store(resolve_store_uri(args.store))
+    described = f"could not read {args.ref} from {store.describe()}"
+    with store_errors(described):
+        packed = store.get(bundle_key(args.ref))
     try:
-        bundle = unpack_bundle(store.get(bundle_key(args.ref)))
+        bundle = unpack_bundle(packed)
     except Exception as error:
-        fail(f"could not read {args.ref} from {store.describe()}: {error}")
+        # Fetched fine and still unusable: neither absent nor unreachable.
+        fail("bundle-unreadable", f"{described}: {error}")
 
     target_cwd = resolve_cwd(args.into if args.into is not None else os.getcwd())
     target_home = home_dir()
-    resume_commands: list[str] = []
+    restored: list[RestoredSession] = []
 
     for session in bundle.sessions:
         target_session_id = str(uuid.uuid4()) if args.new_id else session.session_id
@@ -246,65 +419,145 @@ def command_restore(argv: list[str]) -> None:
         destination = Path(transcript_path_for(target_cwd, target_session_id))
 
         if destination.exists() and not args.force:
-            sys.stderr.write(
-                f"  skipped {target_session_id} (already exists; --force to overwrite)\n"
+            restored.append(
+                RestoredSession(
+                    session_id=target_session_id,
+                    origin_session_id=session.session_id,
+                    branch=session.git_branch,
+                    status="skipped",
+                    path=str(destination),
+                    residual_origin_paths=(),
+                    resume_command=None,
+                )
             )
             continue
 
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(transcript, encoding="utf-8")
 
-        residual = residual_origin_paths(transcript, spec)
+        restored.append(
+            RestoredSession(
+                session_id=target_session_id,
+                origin_session_id=session.session_id,
+                branch=session.git_branch,
+                status="restored",
+                path=str(destination),
+                residual_origin_paths=tuple(residual_origin_paths(transcript, spec)),
+                resume_command=(
+                    f"cd {target_cwd} && claude --resume {target_session_id}"
+                ),
+            )
+        )
+
+    payload = {
+        "ref": args.ref,
+        "store": store.describe(),
+        "cwd": target_cwd,
+        "origin": {
+            "hostname": bundle.origin.hostname,
+            "home": bundle.origin.home,
+            "platform": bundle.origin.platform,
+        },
+        "sessions": [_restored_payload(session) for session in restored],
+    }
+    warnings = tuple(
+        f"  skipped {session.session_id} (already exists; --force to overwrite)\n"
+        for session in restored
+        if session.status == "skipped"
+    )
+
+    if not any(session.status == "restored" for session in restored):
+        raise CommandError("nothing-restored", "nothing restored", payload, warnings)
+
+    return Result(
+        command="restore",
+        payload=payload,
+        text=_restore_text(bundle, restored),
+        warnings=warnings,
+    )
+
+
+def _restored_payload(session: RestoredSession) -> dict[str, Any]:
+    return {
+        "sessionId": session.session_id,
+        "originSessionId": session.origin_session_id,
+        "branch": session.branch,
+        "status": session.status,
+        "path": session.path,
+        "residualOriginPaths": list(session.residual_origin_paths),
+        "resumeCommand": session.resume_command,
+    }
+
+
+def _restore_text(bundle: Bundle, restored: list[RestoredSession]) -> str:
+    lines = []
+    for session in restored:
+        if session.status != "restored":
+            continue
+        residual = session.residual_origin_paths
         note = f"  (residual origin paths: {', '.join(residual)})" if residual else ""
-        sys.stdout.write(
-            f"  restored {target_session_id} [{session.git_branch or 'no branch'}]{note}\n"
+        lines.append(
+            f"  restored {session.session_id} [{session.branch or 'no branch'}]{note}\n"
         )
-        resume_commands.append(
-            f"  cd {target_cwd} && claude --resume {target_session_id}"
-        )
-
-    if not resume_commands:
-        fail("nothing restored")
-
-    sys.stdout.write(
+    lines.append(
         f"\nfrom {bundle.origin.hostname} ({bundle.origin.home})\nresume with:\n"
     )
-    for command in resume_commands:
-        sys.stdout.write(f"{command}\n")
+    lines += [
+        f"  {session.resume_command}\n"
+        for session in restored
+        if session.resume_command
+    ]
+    return "".join(lines)
 
 
-def command_delete(argv: list[str]) -> None:
+def command_delete(argv: list[str]) -> Result:
     parser = _parser("delete")
     parser.add_argument("ref", nargs="?")
     parser.add_argument("--store")
     args = parser.parse_args(argv)
 
     if not args.ref:
-        fail("delete requires a bundle ref")
+        fail("missing-ref", "delete requires a bundle ref")
 
     store = create_store(resolve_store_uri(args.store))
-    try:
+    with store_errors(f"could not delete {args.ref} from {store.describe()}"):
         removed = delete_bundle(store, args.ref)
-    except Exception as error:
-        fail(f"could not delete {args.ref} from {store.describe()}: {error}")
 
-    for key in removed:
-        sys.stdout.write(f"  removed {key}\n")
-    sys.stdout.write(f"\ndeleted {args.ref} from {store.describe()}\n")
+    text = "".join(f"  removed {key}\n" for key in removed)
+    text += f"\ndeleted {args.ref} from {store.describe()}\n"
+    return Result(
+        command="delete",
+        payload={"ref": args.ref, "store": store.describe(), "removed": removed},
+        text=text,
+    )
 
 
-def command_reindex(argv: list[str]) -> None:
+def command_reindex(argv: list[str]) -> Result:
     parser = _parser("reindex")
     parser.add_argument("--store")
     args = parser.parse_args(argv)
 
     store = create_store(resolve_store_uri(args.store))
-    result = reindex(store)
+    with store_errors(f"could not reindex {store.describe()}"):
+        result = reindex(store)
 
-    sys.stdout.write(f"scanned {result.bundles} bundle(s) in {store.describe()}\n")
-    sys.stdout.write(
-        f"wrote {result.entries} index entries, removed {result.removed} stale\n"
+    return Result(
+        command="reindex",
+        payload={
+            "store": store.describe(),
+            "bundles": result.bundles,
+            "entries": result.entries,
+            "removed": result.removed,
+        },
+        text=(
+            f"scanned {result.bundles} bundle(s) in {store.describe()}\n"
+            f"wrote {result.entries} index entries, removed {result.removed} stale\n"
+        ),
     )
+
+
+def command_help(argv: list[str]) -> Result:
+    return Result(command="help", payload={"usage": USAGE}, text=USAGE)
 
 
 def _platform_name() -> str:
@@ -314,25 +567,46 @@ def _platform_name() -> str:
     )
 
 
+COMMANDS: dict[str, Callable[[list[str]], Result]] = {
+    "list": command_list,
+    "save": command_save,
+    "restore": command_restore,
+    "delete": command_delete,
+    "reindex": command_reindex,
+    "help": command_help,
+}
+
+
 def main() -> None:
     argv = sys.argv[1:]
-    command = argv[0] if argv else None
-    rest = argv[1:]
+    # Read off argv rather than from a parsed namespace: an unknown command, or
+    # a subparser rejecting a flag, has to render in the mode the caller asked
+    # for, and neither of those has a namespace by the time it fails.
+    as_json = JSON_FLAG in argv
+    if argv and argv[0] == JSON_FLAG:
+        argv = argv[1:]
 
-    if command == "list":
-        command_list(rest)
-    elif command == "save":
-        command_save(rest)
-    elif command == "restore":
-        command_restore(rest)
-    elif command == "delete":
-        command_delete(rest)
-    elif command == "reindex":
-        command_reindex(rest)
-    elif command in ("help", "--help", "-h", None):
-        sys.stdout.write(USAGE)
-    else:
-        fail(f"unknown command '{command}' (try: lochy help)")
+    command = argv[0] if argv else "help"
+    if command in ("--help", "-h"):
+        command = "help"
+
+    try:
+        handler = COMMANDS.get(command)
+        if handler is None:
+            fail("unknown-command", f"unknown command '{command}' (try: lochy help)")
+        result = handler(argv[1:])
+    except HelpRequested as help_text:
+        result = Result(command, {"usage": help_text.text}, text=help_text.text)
+    except CommandError as error:
+        emit_error(command, error, as_json)
+    except Exception as error:
+        # A traceback is the most useful thing a human can get, and the one
+        # thing a JSON consumer can't parse.
+        if not as_json:
+            raise
+        emit_error(command, CommandError("internal", str(error)), True)
+
+    emit(result, as_json)
 
 
 if __name__ == "__main__":

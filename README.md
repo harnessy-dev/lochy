@@ -55,6 +55,41 @@ lochy reindex
 `save` bundles every session matching the filter, so a branch with several
 sessions produces a single ref.
 
+## Scripting it
+
+Every command takes `--json`, before or after the subcommand, and prints one
+document on stdout instead of the text above:
+
+```sh
+lochy save --json --branch feature/checkout-flow --store /tmp/outbound
+# {"schema":1,"ok":true,"command":"save","ref":"10482276...","bytes":4712,
+#  "redacted":2,"sessions":[{"sessionId":"e71cdcb1-...","branch":"feature/checkout-flow",
+#  "redactions":{"aws-access-key":1,"jwt":1}}],"indexed":[...]}
+
+ref=$(lochy save --json --store /tmp/outbound | jq -r .ref)
+lochy restore --json "$ref" --into /path/to/repo --store /tmp/outbound
+```
+
+Failures are documents too, on stdout, so one stream carries both outcomes:
+
+```sh
+lochy restore --json deadbeef --store /tmp/outbound; echo "exit $?"
+# {"schema":1,"ok":false,"command":"restore","code":"bundle-not-found",
+#  "error":"could not read deadbeef from /tmp/outbound: ..."}
+# exit 1
+```
+
+Branch on `code`, not on `error` — the codes are stable
+(`no-sessions`, `redaction-failed`, `missing-ref`, `bundle-not-found`,
+`store-unreachable`, `bundle-unreadable`, `nothing-restored`,
+`unknown-command`, `usage`, `internal`), the messages are prose and will get
+reworded. A ref that isn't there is `bundle-not-found` and a store that didn't
+answer is `store-unreachable`, so a caller knows which one is worth retrying.
+`schema` versions the envelope.
+An empty result is `{"sessions": []}` with `ok: true`, not a failure, and
+`restore` reports each session as `restored` or `skipped` with its own
+`residualOriginPaths` rather than warning in prose.
+
 ## Layout of a store
 
 ```
@@ -128,8 +163,9 @@ they disagree resumes into a hybrid transcript.
   structure — AWS, GitHub, Slack, Stripe, Anthropic, OpenAI and Google keys,
   JWTs, PEM blocks — plus `UPPERCASE_NAME=value` assignments, which is the
   only way to catch an AWS secret access key. It will miss anything shaped
-  like ordinary text. **A redacted bundle is not a safe bundle: rotate any
-  credential an agent has read.**
+  like ordinary text. `list`'s one-line summary goes through the same rules,
+  since it prints the first user message. **A redacted bundle is not a safe
+  bundle: rotate any credential an agent has read.**
 - **Transcripts are sensitive regardless.** They hold verbatim tool output —
   file contents, command output, API responses. Anything an agent read is in
   the bundle. Treat a store as being as sensitive as the repo it came from,

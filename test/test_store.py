@@ -8,6 +8,7 @@ from moto import mock_aws
 from lochy.store import (
     DEFAULT_STORE,
     FileStore,
+    MissingObject,
     S3Store,
     create_store,
     resolve_store_uri,
@@ -53,6 +54,27 @@ def test_file_store_lists_nothing_before_anything_is_written(tmp_path: Path) -> 
     assert FileStore(str(tmp_path / "missing")).list("") == []
 
 
+def test_file_store_reports_an_absent_object_as_missing_not_as_an_os_error(
+    tmp_path: Path,
+) -> None:
+    store = FileStore(str(tmp_path / "store"))
+    with pytest.raises(MissingObject):
+        store.get("bundles/nope.loch")
+
+
+def test_file_store_lets_an_unreachable_root_surface_as_itself(
+    tmp_path: Path,
+) -> None:
+    """A store that can't answer is not a store answering "absent" — the
+    caller retries one and gives up on the other."""
+    blocked = tmp_path / "blocked"
+    blocked.write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(OSError) as failure:
+        FileStore(str(blocked)).get("bundles/nope.loch")
+    assert not isinstance(failure.value, MissingObject)
+
+
 def test_create_store_parses_uris(tmp_path: Path) -> None:
     assert isinstance(create_store(str(tmp_path)), FileStore)
     assert create_store(f"file://{tmp_path}").describe() == str(tmp_path)
@@ -91,6 +113,24 @@ def test_s3_store_round_trips(aws_credentials: None) -> None:
         Bucket="sessions", Key="bundles/abc.loch"
     )
     assert stored["ContentType"] == "application/gzip"
+
+
+@mock_aws
+def test_s3_store_reports_an_absent_key_as_missing(aws_credentials: None) -> None:
+    boto3.client("s3", region_name="us-east-1").create_bucket(Bucket="sessions")
+
+    with pytest.raises(MissingObject):
+        S3Store("sessions", "bundles").get("abc.loch")
+
+
+@mock_aws
+def test_s3_store_lets_a_missing_bucket_surface_as_itself(
+    aws_credentials: None,
+) -> None:
+    from botocore.exceptions import ClientError
+
+    with pytest.raises(ClientError):
+        S3Store("no-such-bucket", "bundles").get("abc.loch")
 
 
 @mock_aws

@@ -27,7 +27,7 @@ from lochy.index import (
     reindex,
     value_prefix,
 )
-from lochy.store import FileStore, S3Store
+from lochy.store import FileStore, MissingObject, S3Store
 
 
 def session(session_id: str, branch: str | None, cwd: str = "/repo") -> BundleSession:
@@ -173,7 +173,7 @@ def test_delete_leaves_other_bundles_indexed(tmp_path: Path) -> None:
 
 def test_delete_reports_a_missing_ref(tmp_path: Path) -> None:
     store = FileStore(str(tmp_path / "store"))
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(MissingObject):
         delete_bundle(store, "nope")
 
 

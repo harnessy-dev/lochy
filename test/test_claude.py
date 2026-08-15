@@ -2,7 +2,10 @@ import json
 import os
 from pathlib import Path
 
+import pytest
+
 from lochy.claude import (
+    SUMMARY_LIMIT,
     encode_cwd,
     encode_path,
     list_sessions,
@@ -11,6 +14,9 @@ from lochy.claude import (
     session_dir_for,
     transcript_path_for,
 )
+from lochy.redact import Redaction, RedactionError
+
+SECRET = "ghp_" + "a1B2c3D4e5" * 4
 
 
 def write_session(
@@ -74,6 +80,51 @@ def test_reads_metadata_from_a_transcript(tmp_path: Path) -> None:
     assert meta.claude_version == "1.0.99"
     assert meta.summary == "do the thing"
     assert meta.modified_at.endswith("Z")
+
+
+def test_a_secret_in_the_first_message_never_reaches_the_summary(
+    tmp_path: Path,
+) -> None:
+    path = write_session(
+        tmp_path, "/Users/mike/proj", "abc", summary=f"deploy with {SECRET}"
+    )
+
+    meta = read_session_meta(str(path))
+
+    assert meta is not None
+    assert meta.summary == "deploy with [REDACTED:github-token]"
+
+
+def test_a_secret_is_scrubbed_before_the_summary_is_cut_to_length(
+    tmp_path: Path,
+) -> None:
+    """Truncating first would leave a fragment too short for any rule to match,
+    so the tail of a secret would ride along unredacted."""
+    padding = "x" * (SUMMARY_LIMIT - 11) + " "
+    path = write_session(
+        tmp_path, "/Users/mike/proj", "abc", summary=f"{padding}{SECRET}"
+    )
+
+    meta = read_session_meta(str(path))
+
+    assert meta is not None
+    assert len(meta.summary or "") == SUMMARY_LIMIT
+    assert "ghp_" not in (meta.summary or "")
+
+
+def test_a_summary_that_will_not_come_clean_is_dropped_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(text: str) -> Redaction:
+        raise RedactionError("still matching")
+
+    monkeypatch.setattr("lochy.claude.redact", refuse)
+    path = write_session(tmp_path, "/Users/mike/proj", "abc", summary="anything")
+
+    meta = read_session_meta(str(path))
+
+    assert meta is not None
+    assert meta.summary == "[REDACTED]"
 
 
 def test_ignores_a_transcript_with_no_cwd(tmp_path: Path) -> None:
