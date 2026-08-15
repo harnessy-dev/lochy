@@ -27,6 +27,18 @@ from .claude import (
     resolve_cwd,
     transcript_path_for,
 )
+from .git import current_branch
+from .index import (
+    BRANCH,
+    IndexEntry,
+    bundle_key,
+    delete_bundle,
+    dimension_prefix,
+    index_bundle,
+    load_entries,
+    reindex,
+    value_prefix,
+)
 from .redact import RedactionError, redact, summarize
 from .rewrite import RewriteSpec, residual_origin_paths, rewrite_transcript
 from .store import create_store, resolve_store_uri
@@ -35,8 +47,11 @@ USAGE = """lochy — save and restore agent coding sessions across machines
 
 Usage:
   lochy list    [--cwd <path>] [--branch <name>]
+  lochy list    --remote [--branch <name>] [--all] [--store <uri>]
   lochy save    [--cwd <path>] [--branch <name>] [--session <id>] [--store <uri>]
   lochy restore <ref> [--into <path>] [--store <uri>] [--force] [--new-id]
+  lochy delete  <ref> [--store <uri>]
+  lochy reindex [--store <uri>]
 
 Stores:
   <path>              local directory
@@ -71,6 +86,16 @@ def describe(meta: SessionMeta) -> str:
     )
 
 
+def describe_entry(entry: IndexEntry) -> str:
+    branch = f"[{entry.value}]" if entry.value else "[no branch]"
+    when = entry.created_at[:16].replace("T", " ")
+    version = f"  claude {entry.claude_version}" if entry.claude_version else ""
+    return (
+        f"{when}  {format_bytes(entry.bytes):>5}  {entry.sessions} session(s)  "
+        f"{branch}{version}  {entry.cwd}"
+    )
+
+
 def collect(
     cwd: str | None, branch: str | None, session: str | None = None
 ) -> tuple[str, list[SessionMeta]]:
@@ -86,7 +111,14 @@ def command_list(argv: list[str]) -> None:
     parser = _parser("list")
     parser.add_argument("--cwd")
     parser.add_argument("--branch")
+    parser.add_argument("--remote", action="store_true")
+    parser.add_argument("--all", action="store_true", dest="every")
+    parser.add_argument("--store")
     args = parser.parse_args(argv)
+
+    if args.remote or args.every or args.store is not None:
+        list_remote(args)
+        return
 
     cwd, sessions = collect(args.cwd, args.branch)
     if not sessions:
@@ -96,6 +128,24 @@ def command_list(argv: list[str]) -> None:
     sys.stdout.write(f"{len(sessions)} session(s) for {cwd}\n")
     for meta in sessions:
         sys.stdout.write(f"  {describe(meta)}\n")
+
+
+def list_remote(args: argparse.Namespace) -> None:
+    store = create_store(resolve_store_uri(args.store))
+    cwd = resolve_cwd(args.cwd if args.cwd is not None else os.getcwd())
+    branch = args.branch if args.branch is not None else current_branch(cwd)
+    scope = "" if args.every else f" for [{branch or 'no branch'}]"
+
+    prefix = dimension_prefix(BRANCH) if args.every else value_prefix(BRANCH, branch)
+    entries = load_entries(store, prefix)
+    if not entries:
+        sys.stdout.write(f"no bundles{scope} in {store.describe()}\n")
+        return
+
+    refs = {entry.ref for entry in entries}
+    sys.stdout.write(f"{len(refs)} bundle(s){scope} in {store.describe()}\n")
+    for entry in entries:
+        sys.stdout.write(f"  {entry.ref}\n    {describe_entry(entry)}\n")
 
 
 def command_save(argv: list[str]) -> None:
@@ -143,14 +193,19 @@ def command_save(argv: list[str]) -> None:
     packed = pack_bundle(bundle)
     ref = bundle_ref(packed)
     store = create_store(resolve_store_uri(args.store))
-    store.put(f"{ref}.loch", packed)
+    # Bundle first: an index entry is derived from it, so a pointer to a
+    # bundle that isn't there yet is the worse half of a failed save.
+    store.put(bundle_key(ref), packed)
+    entries = index_bundle(store, bundle, ref, len(packed))
 
     for session, redacted in zip(bundle.sessions, redaction_notes):
         note = f" — {redacted}" if redacted else ""
         sys.stdout.write(
             f"  packed {session.session_id} [{session.git_branch or 'no branch'}]{note}\n"
         )
+    indexed = ", ".join(f"[{entry.value or 'no branch'}]" for entry in entries)
     sys.stdout.write(f"\nstored {format_bytes(len(packed))} in {store.describe()}\n")
+    sys.stdout.write(f"indexed under {indexed}\n")
     sys.stdout.write(f"ref {ref}\n")
 
 
@@ -168,7 +223,7 @@ def command_restore(argv: list[str]) -> None:
 
     store = create_store(resolve_store_uri(args.store))
     try:
-        bundle = unpack_bundle(store.get(f"{args.ref}.loch"))
+        bundle = unpack_bundle(store.get(bundle_key(args.ref)))
     except Exception as error:
         fail(f"could not read {args.ref} from {store.describe()}: {error}")
 
@@ -218,6 +273,40 @@ def command_restore(argv: list[str]) -> None:
         sys.stdout.write(f"{command}\n")
 
 
+def command_delete(argv: list[str]) -> None:
+    parser = _parser("delete")
+    parser.add_argument("ref", nargs="?")
+    parser.add_argument("--store")
+    args = parser.parse_args(argv)
+
+    if not args.ref:
+        fail("delete requires a bundle ref")
+
+    store = create_store(resolve_store_uri(args.store))
+    try:
+        removed = delete_bundle(store, args.ref)
+    except Exception as error:
+        fail(f"could not delete {args.ref} from {store.describe()}: {error}")
+
+    for key in removed:
+        sys.stdout.write(f"  removed {key}\n")
+    sys.stdout.write(f"\ndeleted {args.ref} from {store.describe()}\n")
+
+
+def command_reindex(argv: list[str]) -> None:
+    parser = _parser("reindex")
+    parser.add_argument("--store")
+    args = parser.parse_args(argv)
+
+    store = create_store(resolve_store_uri(args.store))
+    result = reindex(store)
+
+    sys.stdout.write(f"scanned {result.bundles} bundle(s) in {store.describe()}\n")
+    sys.stdout.write(
+        f"wrote {result.entries} index entries, removed {result.removed} stale\n"
+    )
+
+
 def _platform_name() -> str:
     system = platform.system().lower()
     return {"darwin": "darwin", "linux": "linux", "windows": "win32"}.get(
@@ -236,6 +325,10 @@ def main() -> None:
         command_save(rest)
     elif command == "restore":
         command_restore(rest)
+    elif command == "delete":
+        command_delete(rest)
+    elif command == "reindex":
+        command_reindex(rest)
     elif command in ("help", "--help", "-h", None):
         sys.stdout.write(USAGE)
     else:

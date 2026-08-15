@@ -30,6 +30,29 @@ def test_file_store_round_trips(tmp_path: Path) -> None:
     assert store.describe() == str(tmp_path / "store")
 
 
+def test_file_store_lists_by_prefix_and_deletes(tmp_path: Path) -> None:
+    store = FileStore(str(tmp_path / "store"))
+    store.put("bundles/abc.loch", b"a")
+    store.put("index/branch/main/abc", b"b")
+    store.put("index/branch/feature%2Ffoo/abc", b"c")
+
+    assert store.list("") == [
+        "bundles/abc.loch",
+        "index/branch/feature%2Ffoo/abc",
+        "index/branch/main/abc",
+    ]
+    assert store.list("index/branch/ma") == ["index/branch/main/abc"]
+    assert store.list("nothing/") == []
+
+    store.delete("index/branch/main/abc")
+    store.delete("index/branch/main/abc")
+    assert store.list("index/") == ["index/branch/feature%2Ffoo/abc"]
+
+
+def test_file_store_lists_nothing_before_anything_is_written(tmp_path: Path) -> None:
+    assert FileStore(str(tmp_path / "missing")).list("") == []
+
+
 def test_create_store_parses_uris(tmp_path: Path) -> None:
     assert isinstance(create_store(str(tmp_path)), FileStore)
     assert create_store(f"file://{tmp_path}").describe() == str(tmp_path)
@@ -81,6 +104,34 @@ def test_s3_store_without_a_prefix(aws_credentials: None) -> None:
         Bucket="sessions"
     )
     assert [item["Key"] for item in stored["Contents"]] == ["abc.loch"]
+
+
+@mock_aws
+def test_s3_store_lists_by_prefix_and_deletes(aws_credentials: None) -> None:
+    boto3.client("s3", region_name="us-east-1").create_bucket(Bucket="sessions")
+
+    store = S3Store("sessions", "bundles")
+    store.put("bundles/abc.loch", b"a")
+    store.put("index/branch/main/abc", b"b")
+
+    assert store.list("") == ["bundles/abc.loch", "index/branch/main/abc"]
+    assert store.list("index/") == ["index/branch/main/abc"]
+
+    store.delete("index/branch/main/abc")
+    store.delete("index/branch/main/abc")
+    assert store.list("") == ["bundles/abc.loch"]
+
+
+@mock_aws
+def test_s3_store_lists_past_the_first_page(aws_credentials: None) -> None:
+    client = boto3.client("s3", region_name="us-east-1")
+    client.create_bucket(Bucket="sessions")
+    for number in range(1001):
+        client.put_object(
+            Bucket="sessions", Key=f"index/branch/main/{number:04d}", Body=b""
+        )
+
+    assert len(S3Store("sessions", "").list("index/")) == 1001
 
 
 @mock_aws

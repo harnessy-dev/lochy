@@ -108,7 +108,8 @@ def test_save_then_restore_onto_another_machine(
     assert "packed abc [main]" in out
     ref = re.search(r"^ref ([0-9a-f]{64})$", out, re.M)
     assert ref is not None
-    assert (store / f"{ref.group(1)}.loch").exists()
+    assert (store / "bundles" / f"{ref.group(1)}.loch").exists()
+    assert (store / "index" / "branch" / "main" / ref.group(1)).exists()
 
     target_home = tmp_path / "target-home"
     target_project = tmp_path / "target" / "work" / "proj"
@@ -158,7 +159,7 @@ def test_save_redacts_secrets_without_touching_the_local_transcript(
 
     ref = re.search(r"^ref ([0-9a-f]{64})$", out, re.M)
     assert ref is not None
-    bundle = unpack_bundle((store / f"{ref.group(1)}.loch").read_bytes())
+    bundle = unpack_bundle((store / "bundles" / f"{ref.group(1)}.loch").read_bytes())
     assert secret not in bundle.sessions[0].transcript
     assert "[REDACTED:aws-access-key]" in bundle.sessions[0].transcript
 
@@ -276,3 +277,148 @@ def test_restore_reports_an_unreadable_ref(
     )
     assert err.startswith("lochy: could not read deadbeef from")
     assert code == 1
+
+
+def save_two_branches(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    home: Path,
+    project: Path,
+    store: Path,
+) -> str:
+    project.mkdir(parents=True, exist_ok=True)
+    write_session(home, str(project), "abc", git_branch="main")
+    write_session(home, str(project), "def", git_branch="feature/foo")
+
+    out, _, _ = invoke(
+        monkeypatch, capsys, home, "save", "--cwd", str(project), "--store", str(store)
+    )
+    ref = re.search(r"^ref ([0-9a-f]{64})$", out, re.M)
+    assert ref is not None
+    assert "indexed under [feature/foo], [main]" in out
+    return ref.group(1)
+
+
+def test_list_remote_finds_a_bundle_by_branch(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    store = tmp_path / "store"
+    ref = save_two_branches(monkeypatch, capsys, home, tmp_path / "proj", store)
+
+    out, _, _ = invoke(
+        monkeypatch,
+        capsys,
+        home,
+        "list",
+        "--remote",
+        "--branch",
+        "feature/foo",
+        "--store",
+        str(store),
+    )
+    assert "1 bundle(s) for [feature/foo]" in out
+    assert ref in out
+    assert "1 session(s)" in out
+    assert "claude 1.0.99" in out
+
+    out, _, _ = invoke(
+        monkeypatch,
+        capsys,
+        home,
+        "list",
+        "--remote",
+        "--branch",
+        "nope",
+        "--store",
+        str(store),
+    )
+    assert out.startswith("no bundles for [nope] in")
+
+
+def test_list_remote_defaults_to_the_branch_you_are_on(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    store = tmp_path / "store"
+    ref = save_two_branches(monkeypatch, capsys, home, tmp_path / "proj", store)
+    monkeypatch.setattr("lochy.cli.current_branch", lambda cwd: "feature/foo")
+
+    out, _, _ = invoke(
+        monkeypatch, capsys, home, "list", "--remote", "--store", str(store)
+    )
+
+    assert "1 bundle(s) for [feature/foo]" in out
+    assert ref in out
+
+
+def test_list_remote_all_shows_every_branch(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    store = tmp_path / "store"
+    save_two_branches(monkeypatch, capsys, home, tmp_path / "proj", store)
+
+    out, _, _ = invoke(
+        monkeypatch, capsys, home, "list", "--all", "--store", str(store)
+    )
+
+    assert out.startswith("1 bundle(s) in")
+    assert "[feature/foo]" in out
+    assert "[main]" in out
+
+
+def test_delete_removes_the_bundle_and_its_entries(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    store = tmp_path / "store"
+    ref = save_two_branches(monkeypatch, capsys, home, tmp_path / "proj", store)
+
+    out, _, _ = invoke(monkeypatch, capsys, home, "delete", ref, "--store", str(store))
+    assert f"removed bundles/{ref}.loch" in out
+    assert f"removed index/branch/feature%2Ffoo/{ref}" in out
+
+    out, _, _ = invoke(
+        monkeypatch, capsys, home, "list", "--all", "--store", str(store)
+    )
+    assert out.startswith("no bundles in")
+
+    _, err, code = invoke(
+        monkeypatch, capsys, home, "restore", ref, "--store", str(store)
+    )
+    assert err.startswith(f"lochy: could not read {ref} from")
+    assert code == 1
+
+
+def test_delete_reports_a_ref_that_is_not_there(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _, err, code = invoke(
+        monkeypatch, capsys, tmp_path, "delete", "deadbeef", "--store", str(tmp_path)
+    )
+    assert err.startswith("lochy: could not delete deadbeef from")
+    assert code == 1
+
+
+def test_reindex_rebuilds_a_wiped_index(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    store = tmp_path / "store"
+    ref = save_two_branches(monkeypatch, capsys, home, tmp_path / "proj", store)
+
+    for entry in (store / "index").rglob("*"):
+        if entry.is_file():
+            entry.unlink()
+
+    out, _, _ = invoke(monkeypatch, capsys, home, "reindex", "--store", str(store))
+    assert "scanned 1 bundle(s) in" in out
+    assert "wrote 2 index entries, removed 0 stale" in out
+
+    out, _, _ = invoke(
+        monkeypatch, capsys, home, "list", "--all", "--store", str(store)
+    )
+    assert ref in out
+    assert "[feature/foo]" in out
+    assert "[main]" in out

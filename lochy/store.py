@@ -21,6 +21,14 @@ class Store(ABC):
     @abstractmethod
     def get(self, key: str) -> bytes: ...
 
+    @abstractmethod
+    def list(self, prefix: str) -> list[str]: ...
+
+    # Deleting an absent key succeeds: index entries are derived, so a repair
+    # pass has to be able to remove ones a half-finished save never wrote.
+    @abstractmethod
+    def delete(self, key: str) -> None: ...
+
 
 class FileStore(Store):
     def __init__(self, root: str) -> None:
@@ -37,6 +45,22 @@ class FileStore(Store):
     def get(self, key: str) -> bytes:
         return (Path(self._root) / key).read_bytes()
 
+    def list(self, prefix: str) -> list[str]:
+        root = Path(self._root)
+        if not root.is_dir():
+            return []
+        # String prefix rather than directory descent, so both backends answer
+        # the same question for a prefix that stops mid-segment.
+        return sorted(
+            key
+            for path in root.rglob("*")
+            if path.is_file()
+            and (key := path.relative_to(root).as_posix()).startswith(prefix)
+        )
+
+    def delete(self, key: str) -> None:
+        (Path(self._root) / key).unlink(missing_ok=True)
+
 
 class S3Store(Store):
     def __init__(self, bucket: str, prefix: str) -> None:
@@ -48,6 +72,9 @@ class S3Store(Store):
 
     def _key_for(self, key: str) -> str:
         return f"{self._prefix}/{key}" if self._prefix else key
+
+    def _relative_key(self, key: str) -> str:
+        return key[len(self._prefix) + 1 :] if self._prefix else key
 
     # Imported lazily so the file backend never pays for loading the SDK.
     def _client(self) -> "S3Client":
@@ -81,6 +108,20 @@ class S3Store(Store):
             raise ValueError(f"empty object at {self._key_for(key)}")
         data: bytes = body.read()
         return data
+
+    def list(self, prefix: str) -> list[str]:
+        # Paginated: list_objects_v2 truncates at 1000 keys.
+        pages = self._client().get_paginator("list_objects_v2")
+        return sorted(
+            self._relative_key(item["Key"])
+            for page in pages.paginate(
+                Bucket=self._bucket, Prefix=self._key_for(prefix)
+            )
+            for item in page.get("Contents", [])
+        )
+
+    def delete(self, key: str) -> None:
+        self._client().delete_object(Bucket=self._bucket, Key=self._key_for(key))
 
 
 def create_store(uri: str) -> Store:

@@ -59,6 +59,18 @@ this PR," not "what produced commit abc123." Commit-level pointers would
 drag in squash-merge, rebase, and `post-rewrite` handling for no benefit.
 (Nothing writes git pointers yet — this is the intended shape.)
 
+**No single index object.** A shared `index.json` would need
+read-modify-write on every save, so two machines saving concurrently would
+silently clobber each other. Every index write is instead a new object at
+a distinct key, which makes concurrent saves commutative and needs no
+locking from a store that offers none.
+
+**Index entries are derived, never authoritative.** The bundles are the
+source of truth and every entry is reconstructible by listing `bundles/`
+and unpacking. That is what makes `reindex` a repair command and what
+makes a half-failed `save` leave a recoverable store rather than a corrupt
+one. Nothing may end up knowable only from the index.
+
 ## Empirical findings about Claude Code's storage
 
 These were verified by experiment, not documentation, and are not stable
@@ -89,15 +101,49 @@ Python 3.12, Poetry, boto3.
 
 ```
 lochy/
-├── cli.py       # entry point, arg parsing, list/save/restore commands
+├── cli.py       # entry point, arg parsing, list/save/restore/delete/reindex
 ├── claude.py    # Claude Code adapter: path encoding, session discovery, metadata
 ├── bundle.py    # bundle format, gzip, content-addressed ref
+├── index.py     # store key layout, derived index entries, delete and reindex
+├── git.py       # current branch of a checkout, for the list default
 ├── redact.py    # secret scrubbing, applied on save before packing
 ├── rewrite.py   # path rewriting (the load-bearing logic)
 └── store.py     # Store interface + local-fs and S3-compatible backends
 test/
 └── test_*.py    # one module per source module
 ```
+
+The store layout is:
+
+```
+bundles/<ref>.loch                  # the artifact
+index/<dimension>/<value>/<ref>     # derived entry, small JSON payload
+```
+
+`branch` is the only dimension implemented, but it is a *dimension*, not a
+special case: `index/cwd/...` can be added later by passing a different
+name, with no migration and no format change. Don't collapse the
+dimension segment back into the path.
+
+Values are percent-encoded (`feature/foo` → `feature%2Ffoo`) so a segment
+never contains `/`. **Do not reuse Claude's `[^a-zA-Z0-9] -> -` scheme
+here** — it is lossy, and it would file `feature/foo` and `feature-foo`
+under the same segment. A session with no branch is indexed under `%00`,
+which no real value can encode to since a ref name can't hold a control
+character.
+
+Branch is a property of each *session*, not of the bundle: a `save`
+without `--branch` can pack sessions from several branches, so one bundle
+gets one entry per branch it touches. An entry carries only display
+metadata — session count, cwd, timestamp, packed size, Claude version —
+enough to list a branch without fetching a single bundle.
+
+Ordering matters in both directions and for the same reason. `save`
+writes the bundle before its entries, so a failure leaves an
+unindexed bundle that `reindex` can recover. `delete` removes the entries
+before the bundle, since the entries are derived from it and losing the
+bundle first would strand them. `Store.delete` on an absent key succeeds,
+which is what lets either repair run.
 
 `rewrite.py` is where correctness actually lives. It does a **single
 left-to-right pass** with longest-match-first alternation, so a
@@ -177,15 +223,28 @@ failure surfaces as "The bucket you are attempting to access must be
 addressed using the specified endpoint," so set `LOCHY_S3_REGION`
 when the bucket's region differs from the AWS config default.
 
+Listing and deleting need IAM actions the bucket policy may not grant
+yet: `s3:ListBucket` is **bucket-level**, on `arn:aws:s3:::<bucket>`
+rather than `arn:aws:s3:::<bucket>/*` where `s3:GetObject` and
+`s3:PutObject` live, and `s3:DeleteObject` is object-level. A missing
+`s3:ListBucket` makes `list --remote` and `reindex` fail while `save`
+and `restore` keep working.
+
 Redaction on `save` is in and on by default, with no opt-out flag — if
 verbatim bundles turn out to be needed, add one deliberately. Its
 recall is untested against a real leak: the corpus it was measured on
 contained no live credential to catch.
 
-Also missing: `delete`/`list` on the Store interface (a real gap, given
-deletability is the stated reason for choosing object storage), any git
-integration (no notes, no PR-level pointers), no adapters beyond Claude
-Code, and no published package or remote.
+Branch indexing, `delete`, and `reindex` are in, verified against the
+file store and moto. The old flat `<ref>.loch` layout was dropped without
+a migration: nothing had been stored in it beyond throwaway local
+bundles, since every S3 save so far failed on `Access Denied`.
+
+Also missing: any other index dimension (`cwd` is the obvious next one,
+and the layout takes it without a migration), any git integration (no
+notes, no PR-level pointers), no adapters beyond Claude Code, and no
+published package or remote. `restore` still needs a full 64-character
+ref — the index makes refs discoverable, but nothing resolves a prefix.
 
 ## Conventions
 

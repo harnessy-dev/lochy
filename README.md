@@ -35,13 +35,44 @@ lochy list --branch feature/checkout-flow
 lochy save --branch feature/checkout-flow --store s3://my-bucket/sessions
 # -> ref 10482276de745032...
 
-# on another machine, in a checkout of the same branch
+# on another machine: what's been saved for the branch I'm on?
+lochy list --remote --store s3://my-bucket/sessions
+lochy list --remote --branch feature/checkout-flow
+lochy list --all            # every branch in the store
+
 lochy restore 10482276de745032... --store s3://my-bucket/sessions
 # -> cd /path/to/repo && claude --resume e71cdcb1-7c2c-410b-8c73-91cdf0cba4b8
+
+# a transcript that shouldn't be there any more
+lochy delete 10482276de745032...
+
+# rebuild the index from the bundles, if a save was interrupted
+lochy reindex
 ```
 
 `save` bundles every session matching the filter, so a branch with several
 sessions produces a single ref.
+
+## Layout of a store
+
+```
+bundles/<ref>.loch                 the bundle, named by the hash of its bytes
+index/branch/<branch>/<ref>        a small entry per branch the bundle touches
+```
+
+`lochy list --remote` reads only the index, so listing a branch never
+downloads a bundle. Entries are derived from the bundles and hold nothing
+that isn't already in them — `lochy reindex` rebuilds the whole index by
+scanning `bundles/`, and drops entries no bundle backs.
+
+Branch names are percent-encoded, so `feature/foo` stays one path segment
+and doesn't collide with `feature-foo`. Every index write goes to its own
+key, so two machines saving at the same time can't overwrite each other's
+entries.
+
+An S3 store needs `s3:GetObject` and `s3:PutObject` on
+`arn:aws:s3:::<bucket>/*`, plus `s3:ListBucket` on `arn:aws:s3:::<bucket>`
+itself for `list`/`reindex` and `s3:DeleteObject` for `delete`.
 
 ## Stores
 
