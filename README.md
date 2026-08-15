@@ -22,7 +22,8 @@ poetry run lochy --help
 pipx install .    # optional, puts `lochy` on PATH
 ```
 
-Requires Python 3.12.
+Requires Python 3.12 — pass `--python python3.12` to `pipx` if that isn't the
+interpreter it picks by default.
 
 ## Use
 
@@ -33,6 +34,7 @@ lochy list --branch feature/checkout-flow
 
 # pack them up and push to a store
 lochy save --branch feature/checkout-flow --store s3://my-bucket/sessions
+# -> packed e71cdcb1... [feature/checkout-flow] — redacted 2 secrets
 # -> ref 10482276de745032...
 
 # on another machine: what's been saved for the branch I'm on?
@@ -122,10 +124,16 @@ they disagree resumes into a hybrid transcript.
   substituted, but a session that referenced files outside the repo will
   still point at paths that don't exist locally. `restore` warns when origin
   paths survive the rewrite.
-- **No redaction.** Transcripts contain verbatim tool output — file contents,
-  command output, API responses. Anything an agent read is in the bundle.
-  Treat a store as being as sensitive as the repo it came from, and prefer a
-  bucket you can delete from over anything append-only.
+- **Redaction is best-effort.** `save` scrubs credentials with distinctive
+  structure — AWS, GitHub, Slack, Stripe, Anthropic, OpenAI and Google keys,
+  JWTs, PEM blocks — plus `UPPERCASE_NAME=value` assignments, which is the
+  only way to catch an AWS secret access key. It will miss anything shaped
+  like ordinary text. **A redacted bundle is not a safe bundle: rotate any
+  credential an agent has read.**
+- **Transcripts are sensitive regardless.** They hold verbatim tool output —
+  file contents, command output, API responses. Anything an agent read is in
+  the bundle. Treat a store as being as sensitive as the repo it came from,
+  and prefer a bucket you can delete from over anything append-only.
 
 ## License
 
