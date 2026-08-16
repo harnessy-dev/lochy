@@ -335,10 +335,17 @@ envelope.
 CI lives in `.github/workflows/`. `test.yml` runs ruff, mypy and pytest across
 3.10/3.12/3.13 — the floor and the ceiling are where breakage appears — and
 `release.yml` calls it via `workflow_call` rather than repeating it, so an
-untested tag cannot publish. Releasing is: bump `version` in pyproject, commit,
-push a `v<version>` tag. The workflow refuses a tag that disagrees with
-pyproject, since the install path is a pinned asset URL and a wheel named after
-the wrong version is not something to discover afterwards. `uv build` emits a
+untested tag cannot publish. Releasing is `./release.sh <version>`, which bumps
+pyproject, runs the same four checks, commits, tags and pushes. It refuses a
+dirty tree, a branch behind origin, or an existing tag, because a bad tag is
+expensive to undo: a tag-triggered run uses the workflow file *as of the tagged
+commit*, so a broken workflow can't be repaired by re-running the tag — the tag
+has to be deleted from the remote and re-cut. Actions must be pinned to versions
+that exist; `setup-uv` stopped publishing floating major tags after `v7`, and
+`@v10` failed the first release attempt. The workflow independently refuses a
+tag that disagrees with pyproject, since the install path is a pinned asset URL
+and a wheel named after the wrong version is not something to discover
+afterwards. `uv build` emits a
 `py3-none-any` wheel — universal, hence no platform matrix — plus an sdist, and
 both are attached to the GitHub release. The build is byte-reproducible; don't
 introduce anything timestamp-dependent into it. There is deliberately no PyPI
