@@ -1,4 +1,5 @@
 import os
+import sys
 from pathlib import Path
 
 import boto3
@@ -8,6 +9,7 @@ from moto import mock_aws
 from lochy.store import (
     DEFAULT_STORE,
     FileStore,
+    MissingDependency,
     MissingObject,
     S3Store,
     create_store,
@@ -121,6 +123,24 @@ def test_s3_store_reports_an_absent_key_as_missing(aws_credentials: None) -> Non
 
     with pytest.raises(MissingObject):
         S3Store("sessions", "bundles").get("abc.loch")
+
+
+def test_s3_store_reports_an_uninstalled_sdk_as_such(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """boto3 is an optional extra, so the SDK being absent is an ordinary
+    outcome on a default install rather than a broken environment. None in
+    sys.modules is what an import of an uninstalled package looks like."""
+    monkeypatch.setitem(sys.modules, "boto3", None)
+
+    for call in (
+        lambda: S3Store("sessions", "bundles").get("abc.loch"),
+        lambda: S3Store("sessions", "bundles").put("abc.loch", b"payload"),
+        lambda: S3Store("sessions", "bundles").list(""),
+        lambda: S3Store("sessions", "bundles").delete("abc.loch"),
+    ):
+        with pytest.raises(MissingDependency, match=r"lochy\[s3\]"):
+            call()
 
 
 @mock_aws

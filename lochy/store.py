@@ -17,6 +17,12 @@ class MissingObject(Exception):
     a caller has to be able to tell them apart."""
 
 
+class MissingDependency(Exception):
+    """A backend whose SDK isn't installed. Neither terminal nor worth
+    retrying: the fix is an install, so a caller has to be able to tell this
+    from a store that didn't answer."""
+
+
 class Store(ABC):
     @abstractmethod
     def describe(self) -> str: ...
@@ -85,10 +91,18 @@ class S3Store(Store):
     def _relative_key(self, key: str) -> str:
         return key[len(self._prefix) + 1 :] if self._prefix else key
 
-    # Imported lazily so the file backend never pays for loading the SDK.
+    # Imported lazily so the file backend never pays for loading the SDK —
+    # which is also what lets boto3 be an optional extra rather than a
+    # dependency every install carries.
     def _client(self) -> "S3Client":
-        import boto3
-        from botocore.config import Config
+        try:
+            import boto3
+            from botocore.config import Config
+        except ImportError as error:
+            raise MissingDependency(
+                "the S3 backend needs boto3, which this install doesn't have "
+                "(reinstall as lochy[s3])"
+            ) from error
 
         endpoint = os.environ.get("LOCHY_S3_ENDPOINT")
         region = os.environ.get("LOCHY_S3_REGION")
@@ -109,12 +123,13 @@ class S3Store(Store):
         )
 
     def get(self, key: str) -> bytes:
+        # Before the botocore import, so an install without the extra reports
+        # the missing dependency rather than a bare ImportError.
+        client = self._client()
         from botocore.exceptions import ClientError
 
         try:
-            response = self._client().get_object(
-                Bucket=self._bucket, Key=self._key_for(key)
-            )
+            response = client.get_object(Bucket=self._bucket, Key=self._key_for(key))
         except ClientError as error:
             # A missing bucket stays a plain ClientError: it means the store
             # is misconfigured, not that this one object was deleted.

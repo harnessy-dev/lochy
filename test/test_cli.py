@@ -1,5 +1,7 @@
+import importlib.metadata
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +51,32 @@ def test_help_is_printed_without_a_command(
     out, _, code = invoke(monkeypatch, capsys, tmp_path)
     assert out.startswith("lochy — save and restore")
     assert code is None
+
+
+def test_version_is_reported_in_both_renderings(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    installed = importlib.metadata.version("lochy")
+
+    out, _, code = invoke(monkeypatch, capsys, tmp_path, "--version")
+    assert (out, code) == (f"lochy {installed}\n", None)
+
+    document, _, code = invoke_json(
+        monkeypatch, capsys, tmp_path, "--version", "--json"
+    )
+    assert (document["command"], document["ok"], code) == ("version", True, None)
+    assert document["version"] == installed
+
+
+def test_version_reports_a_source_checkout_that_was_never_installed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    def absent(name: str) -> str:
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(importlib.metadata, "version", absent)
+    document, _, _ = invoke_json(monkeypatch, capsys, tmp_path, "--version", "--json")
+    assert document["version"] == "unknown"
 
 
 def test_unknown_command_fails(
@@ -860,6 +888,44 @@ def test_json_separates_a_ref_that_is_absent_from_a_store_that_did_not_answer(
         "deadbeef",
         "--store",
         str(blocked),
+    )
+    assert (document["code"], code) == ("store-unreachable", 1)
+
+
+def test_json_separates_an_uninstalled_sdk_from_a_store_that_did_not_answer(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """A default install has no boto3, and telling a caller to retry a network
+    problem when the fix is an install is the wrong affordance."""
+    monkeypatch.setitem(sys.modules, "boto3", None)
+    document, _, code = invoke_json(
+        monkeypatch,
+        capsys,
+        tmp_path,
+        "list",
+        "--json",
+        "--remote",
+        "--store",
+        "s3://sessions/prefix",
+    )
+    assert (document["code"], code) == ("s3-extra-missing", 1)
+    assert "lochy[s3]" in document["error"]
+
+    # With the SDK present, a store that doesn't answer is still that.
+    def refuse(self: Any) -> None:
+        raise OSError("connection refused")
+
+    monkeypatch.delitem(sys.modules, "boto3")
+    monkeypatch.setattr("lochy.store.S3Store._client", refuse)
+    document, _, code = invoke_json(
+        monkeypatch,
+        capsys,
+        tmp_path,
+        "list",
+        "--json",
+        "--remote",
+        "--store",
+        "s3://sessions/prefix",
     )
     assert (document["code"], code) == ("store-unreachable", 1)
 

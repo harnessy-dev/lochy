@@ -97,7 +97,7 @@ public API. Re-verify if something breaks.
 
 ## Layout
 
-Python 3.12, Poetry, boto3.
+Python 3.10 through 3.13, Poetry, boto3 behind an extra.
 
 ```
 lochy/
@@ -255,16 +255,21 @@ never a code. The set today:
 | `missing-ref` | `restore`/`delete` called without a ref |
 | `bundle-not-found` | the store answered and the ref isn't there |
 | `store-unreachable` | the store didn't answer |
+| `s3-extra-missing` | an `s3://` store on an install without the `s3` extra |
 | `bundle-unreadable` | the bytes arrived and won't unpack |
 | `nothing-restored` | every session in the bundle was skipped |
 | `unknown-command` | no such subcommand |
 | `usage` | argparse rejected the arguments (exit status 2) |
 | `internal` | an unexpected exception |
 
-The first three are one failure to a human and three different affordances
-to a caller: retry, don't retry, report corruption. Telling them apart is
-why `store.py` raises a typed `MissingObject` — a bare `except Exception`
-around a store call can only produce the union. The `store_errors` block
+The four store-facing codes — `bundle-not-found`, `store-unreachable`,
+`s3-extra-missing`, `bundle-unreadable` — are one failure to a human and four
+different affordances to a caller: don't retry, retry, reinstall, report
+corruption. Telling them apart is why `store.py` raises typed
+`MissingObject` and `MissingDependency` exceptions — a bare `except Exception`
+around a store call can only produce the union, and `s3-extra-missing` was
+`store-unreachable` until boto3 became optional, which told a caller to retry
+a network problem that was really a missing package. The `store_errors` block
 wraps the store call *alone*, since anything wider would relabel a bug in
 this process as a failure of the store.
 
@@ -291,6 +296,53 @@ holding transcript content is `list`'s `summary` (the first 120 characters of
 the first user message, which the text output already prints), and it is
 scrubbed in `claude.py` before it ever becomes a `SessionMeta`. It should
 stay the only such field.
+
+## Packaging and release
+
+The distribution path is `uv tool install <release wheel URL>`: uv is a static
+binary that brings its own CPython, so a machine being bootstrapped over SSH
+needs no Python toolchain and there is no PyPI account in the loop. That
+constrains three things.
+
+**Supported range is 3.10 through 3.13, with no upper bound.** The old
+`>=3.12,<3.13` was pinning copied from an unrelated backend, and it is what
+made `pipx install` fail on both ends — Ubuntu 22.04 ships 3.10, and a 3.13
+box failed the cap. Never reintroduce a ceiling: the next Python breaks the
+install before it breaks the code. 3.10 is the floor because PEP 604 `X | None`
+unions are pervasive and 3.9 would mean rewriting every annotation. One line
+actually needed 3.12 — a backslash inside an f-string expression, PEP 701
+syntax — so keep interpolations backslash-free. `[tool.mypy] python_version`
+is pinned to the floor rather than following the running interpreter, so a
+3.11+ API fails on a 3.13 laptop and not only in CI.
+
+**boto3 is an optional `[s3]` extra.** What makes that safe is the lazy import
+in `S3Store._client`: the `file://` backend loads nothing third-party at
+runtime, so the SDK was only ever an install-time cost — 8 packages and 27MB,
+of which botocore alone is 24MB against lochy's own 172KB. A default install
+is one package and 184KB. Keep the import inside the method, and keep any new
+`botocore` import *after* the `_client()` call that would have failed first,
+or the SDK's absence surfaces as a bare `ImportError` and gets mislabelled
+`store-unreachable`. The dev group still carries boto3, moto and the stubs, so
+the S3 backend stays fully covered by the suite.
+
+**`lochy --version` reads package metadata**, so pyproject is the only place
+the number is set. `importlib.metadata` raises `PackageNotFoundError` in a
+source checkout that was never installed, which reports `"unknown"` — pyproject
+can't be read as a fallback, since `tomllib` arrived in 3.11 and the floor is
+3.10. It is a `Result` like every other command, so `--version --json` is an
+envelope.
+
+CI lives in `.github/workflows/`. `test.yml` runs ruff, mypy and pytest across
+3.10/3.12/3.13 — the floor and the ceiling are where breakage appears — and
+`release.yml` calls it via `workflow_call` rather than repeating it, so an
+untested tag cannot publish. Releasing is: bump `version` in pyproject, commit,
+push a `v<version>` tag. The workflow refuses a tag that disagrees with
+pyproject, since the install path is a pinned asset URL and a wheel named after
+the wrong version is not something to discover afterwards. `uv build` emits a
+`py3-none-any` wheel — universal, hence no platform matrix — plus an sdist, and
+both are attached to the GitHub release. The build is byte-reproducible; don't
+introduce anything timestamp-dependent into it. There is deliberately no PyPI
+publishing.
 
 ## State
 
@@ -339,11 +391,18 @@ between `bundle-not-found` and `store-unreachable` came from, but nothing has
 been wired up against it yet, so the field names have never survived contact
 with a real integration.
 
+The suite passes on 3.10.13 and 3.13 as well as 3.12, and a boto3-free
+install saves and lists against a `file://` store unmodified. **Neither
+workflow has ever run**, though — they were written against a repo with no
+CI and no release, so the first tag push is also the first execution of the
+release path. No release exists yet, so the wheel URL in the README points at
+a `v0.1.0` that has to be cut before it resolves.
+
 Also missing: any other index dimension (`cwd` is the obvious next one,
 and the layout takes it without a migration), any git integration (no
-notes, no PR-level pointers), no adapters beyond Claude Code, and no
-published package or remote. `restore` still needs a full 64-character
-ref — the index makes refs discoverable, but nothing resolves a prefix.
+notes, no PR-level pointers), and no adapters beyond Claude Code.
+`restore` still needs a full 64-character ref — the index makes refs
+discoverable, but nothing resolves a prefix.
 
 ## Conventions
 

@@ -1,4 +1,5 @@
 import argparse
+import importlib.metadata
 import os
 import platform
 import re
@@ -46,7 +47,7 @@ from .index import (
 from .output import JSON_FLAG, CommandError, Result, emit, emit_error
 from .redact import RedactionError, redact, summarize
 from .rewrite import RewriteSpec, residual_origin_paths, rewrite_transcript
-from .store import MissingObject, create_store, resolve_store_uri
+from .store import MissingDependency, MissingObject, create_store, resolve_store_uri
 
 USAGE = """lochy — save and restore agent coding sessions across machines
 
@@ -57,6 +58,7 @@ Usage:
   lochy restore <ref> [--into <path>] [--store <uri>] [--force] [--new-id]
   lochy delete  <ref> [--store <uri>]
   lochy reindex [--store <uri>]
+  lochy --version
 
 Every command takes --json, which replaces the text below with one machine-
 readable document on stdout.
@@ -78,14 +80,17 @@ def fail(code: str, message: str) -> NoReturn:
 
 @contextmanager
 def store_errors(description: str) -> Iterator[None]:
-    """The two failures a caller can actually act on: an object that isn't
-    there is terminal, a store that didn't answer is worth retrying. Keep the
-    block around the store call alone — anything wider mislabels a bug in this
-    process as a failure of the store."""
+    """The three failures a caller can actually act on: an object that isn't
+    there is terminal, a store that didn't answer is worth retrying, and a
+    backend whose SDK is absent is fixed by an install and by nothing else.
+    Keep the block around the store call alone — anything wider mislabels a bug
+    in this process as a failure of the store."""
     try:
         yield
     except MissingObject as error:
         fail("bundle-not-found", f"{description}: {error}")
+    except MissingDependency as error:
+        fail("s3-extra-missing", f"{description}: {error}")
     except Exception as error:
         fail("store-unreachable", f"{description}: {error}")
 
@@ -100,7 +105,10 @@ def format_bytes(count: int) -> str:
 
 def describe(meta: SessionMeta) -> str:
     branch = f"[{meta.git_branch}]" if meta.git_branch else "[no branch]"
-    summary = f" {re.sub(r'\s+', ' ', meta.summary)}" if meta.summary else ""
+    # Hoisted out of the f-string: a backslash inside an interpolation is
+    # PEP 701 syntax and won't parse below 3.12.
+    collapsed = re.sub(r"\s+", " ", meta.summary) if meta.summary else ""
+    summary = f" {collapsed}" if collapsed else ""
     when = meta.modified_at[:16].replace("T", " ")
     return (
         f"{meta.session_id}  {when}  {format_bytes(meta.bytes):>5}  {branch}{summary}"
@@ -560,6 +568,24 @@ def command_help(argv: list[str]) -> Result:
     return Result(command="help", payload={"usage": USAGE}, text=USAGE)
 
 
+def installed_version() -> str:
+    """Read from package metadata rather than held here, so there is one copy
+    of the number and pyproject stays the one that sets it. A source checkout
+    that was never installed has no metadata to read, and pyproject can't be
+    parsed for it either — tomllib arrived in 3.11 and the floor is 3.10."""
+    try:
+        return importlib.metadata.version("lochy")
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def command_version(argv: list[str]) -> Result:
+    version = installed_version()
+    return Result(
+        command="version", payload={"version": version}, text=f"lochy {version}\n"
+    )
+
+
 def _platform_name() -> str:
     system = platform.system().lower()
     return {"darwin": "darwin", "linux": "linux", "windows": "win32"}.get(
@@ -574,6 +600,7 @@ COMMANDS: dict[str, Callable[[list[str]], Result]] = {
     "delete": command_delete,
     "reindex": command_reindex,
     "help": command_help,
+    "version": command_version,
 }
 
 
@@ -589,6 +616,8 @@ def main() -> None:
     command = argv[0] if argv else "help"
     if command in ("--help", "-h"):
         command = "help"
+    if command in ("--version", "-V"):
+        command = "version"
 
     try:
         handler = COMMANDS.get(command)

@@ -5,8 +5,13 @@ description = "Save and restore agent coding sessions across machines"
 authors = [{ name = "Mike Lyons", email = "mdl0394@gmail.com" }]
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.12,<3.13"
-dependencies = ["boto3 (>=1.37.31,<2.0.0)"]
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+# The SDK is imported lazily inside S3Store._client, so a file:// store never
+# touches it at runtime and a default install is 184KB rather than 27MB.
+s3 = ["boto3 (>=1.37.31,<2.0.0)"]
 
 [project.scripts]
 lochy = "lochy.cli:main"
@@ -23,16 +28,22 @@ pytest = "^8.2.2"
 mypy = "^1.10.1"
 moto = "^5.0.11"
 ruff = "^0.11.2"
+boto3 = "^1.37.31"
 boto3-stubs = "^1.34.145"
 mypy-boto3-s3 = "^1.34.105"
 
 [tool.pytest.ini_options]
 testpaths = ["test"]
 
+[tool.mypy]
+# Pinned to the floor rather than left to follow the running interpreter, so a
+# 3.11+ API slipping in fails on a 3.13 laptop and not only in CI.
+python_version = "3.10"
+
 [tool.ruff]
 # Linting configuration
 line-length = 88
-target-version = "py312"
+target-version = "py310"
 lint.select = ["E", "F", "I"]
 lint.ignore = ["E501"]
 

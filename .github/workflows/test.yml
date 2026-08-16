@@ -1,0 +1,42 @@
+name: test
+
+on:
+  # Tags are excluded because the release workflow calls this one, and a tag
+  # push would otherwise run the whole matrix twice.
+  push:
+    tags-ignore: ["**"]
+  pull_request:
+  workflow_call:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor and the ceiling of the supported range, where breakage
+        # appears; 3.12 is what development happens on.
+        python: ["3.10", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+
+      - run: pipx install poetry
+
+      # Poetry otherwise builds the environment against its own interpreter
+      # rather than the one this matrix leg is for.
+      - run: poetry env use python
+      - run: poetry install
+
+      - run: poetry run ruff check
+      - run: poetry run ruff format --check
+      - run: poetry run mypy .
+      - run: poetry run pytest
