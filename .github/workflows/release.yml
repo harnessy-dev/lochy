@@ -16,7 +16,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      # setup-uv stopped publishing floating major tags after v7, so `@v10`
+      # resolves to nothing — it has to be a full version.
+      - uses: astral-sh/setup-uv@v10.0.1
 
       # A mismatch would publish v0.2.0 as an asset named lochy-0.1.0, and the
       # install path is a pinned asset URL, so it is not something to discover
