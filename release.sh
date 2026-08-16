@@ -52,8 +52,14 @@ poetry run mypy .
 poetry run pytest -q
 
 echo "==> tagging $tag"
-run git add pyproject.toml
-run git commit -m "release: $tag"
+# pyproject may already hold this version — the first release, or a re-cut after
+# a deleted tag. An empty commit fails under `set -e`, so tag what's there.
+if [ -n "$(git status --porcelain)" ]; then
+  run git add pyproject.toml
+  run git commit -m "release: $tag"
+else
+  echo "  pyproject is already at $version; tagging the current commit"
+fi
 run git tag -a "$tag" -m "$tag"
 run git push origin "$BRANCH"
 run git push origin "$tag"
