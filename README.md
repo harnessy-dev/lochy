@@ -168,8 +168,11 @@ session ran in. The ref is the SHA-256 of the packed bytes.
 On restore, the origin's paths are rewritten to local ones — the repo path,
 the home directory, and the encoded project-directory form — in a single
 left-to-right pass, longest match first, so a cwd nested under a home
-directory can't be half-rewritten. The result is written to the local
-project directory for the target cwd.
+directory can't be half-rewritten. A path is only substituted where it ends
+on a component boundary, so a sibling directory that merely extends the
+origin's last name — `<repo>-worktrees/<branch>` next to `<repo>` — is left
+alone rather than mangled. The result is written to the local project
+directory for the target cwd.
 
 `--new-id` mints a fresh session id, rewriting the `sessionId` field on every
 line to match the new filename. Claude Code keys off both, and a file where
@@ -185,8 +188,11 @@ they disagree resumes into a hybrid transcript.
   normalized transcript as context, which is a different feature.
 - **Path rewriting is textual.** Absolute paths from the origin machine are
   substituted, but a session that referenced files outside the repo will
-  still point at paths that don't exist locally. `restore` warns when origin
-  paths survive the rewrite.
+  still point at paths that don't exist locally. Paths under a *sibling* of
+  the origin cwd are deliberately not rewritten either — nothing in the text
+  says where they should land on this machine, so guessing would corrupt
+  them. `restore` warns when origin paths survive the rewrite, which is the
+  intended outcome for both cases.
 - **Redaction is best-effort.** `save` scrubs credentials with distinctive
   structure — AWS, GitHub, Slack, Stripe, Anthropic, OpenAI and Google keys,
   JWTs, PEM blocks — plus `UPPERCASE_NAME=value` assignments, which is the

@@ -154,6 +154,35 @@ half-rewritten if the pairs were applied sequentially. Keep the
 single-pass property if you touch it — one alternation regex, one
 `re.sub`, never a loop of `str.replace` calls.
 
+The second property is a **boundary rule**: a path is only substituted
+where the match ends on a path-component boundary. Without it a sibling
+directory that extends the origin's last component gets mangled —
+`<repo>-worktrees/<branch>`, which is where Harness puts every worktree,
+became the target path with its own tail duplicated. That failure was
+**silent**, and that is the part worth remembering: the corrupted string
+no longer contains the origin, so `residual_origin_paths` reported a clean
+rewrite across 239 bad values in one restored session. The guards are
+per-alternative zero-width lookaheads, which is what keeps them compatible
+with the single pass — an alternative that fails its guard falls through
+to a shorter one, so `/Users/mike/projector` still gets its home rewritten
+after the cwd pair declines.
+
+The asymmetry that sets the guards: **too strict fails loudly** (the path
+survives and `residual_origin_paths` reports it), **too lenient fails
+silently**. So the real-path guard rejects only what could continue a
+filename (`[A-Za-z0-9._-]`) and allows every other follower, since a
+transcript ends a path with `"`, `\`, `:`, `,`, a space or a newline far
+more often than with `/`.
+
+The encoded slug takes a stricter rule for a reason that can't be fixed:
+`encode_path` maps every non-alphanumeric to `-`, so `<repo>/sub` and
+`<repo>-sub` encode to the *same string* and no lookahead can tell them
+apart. It is therefore rewritten only as a complete component, which
+declines `<encoded-repo>-worktrees-...` entirely. That is a known lossy
+limitation, and the false negative is the deliberate half of it — don't
+"fix" it by loosening the guard, that reintroduces the corruption. The
+session-id pair is a UUID rather than a path and carries no guard.
+
 `redact.py` scrubs secrets out of a transcript on `save`, before packing.
 It is **best-effort pattern matching and nothing more.** It finds
 credentials with distinctive structure (AWS/GitHub/Slack/Stripe/
