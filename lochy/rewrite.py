@@ -1,7 +1,7 @@
 import re
 from dataclasses import dataclass
 
-from .claude import encode_path
+from .claude import encode_path, transcript_cwds
 
 
 @dataclass(frozen=True)
@@ -76,8 +76,13 @@ def rewrite_transcript(raw: str, spec: RewriteSpec) -> str:
 
 def residual_origin_paths(text: str, spec: RewriteSpec) -> list[str]:
     """Occurrences of the origin's paths that survived a rewrite. A non-empty
-    result means the restored session will reference files that don't exist
-    on this machine."""
+    result means the restored session will reference files that don't exist on
+    this machine.
+
+    Necessary and nowhere near sufficient — see foreign_cwds. This only catches
+    a path that still carries an origin marker, and the more dangerous failure
+    consumes the marker on its way to being wrong.
+    """
     found: dict[str, None] = {}
     for needle in (spec.origin_cwd, spec.origin_home):
         if (
@@ -88,3 +93,43 @@ def residual_origin_paths(text: str, spec: RewriteSpec) -> list[str]:
         ):
             found[needle] = None
     return list(found)
+
+
+@dataclass(frozen=True)
+class ForeignCwd:
+    count: int
+    restored: str
+
+
+def foreign_cwds(raw: str, spec: RewriteSpec) -> dict[str, ForeignCwd]:
+    """Directories a transcript works in that no rewrite into `target_cwd` can
+    satisfy, keyed by their path on the *origin* machine, with the number of
+    records naming each and the string they end up as here.
+
+    This is the check residual_origin_paths structurally cannot make. A cwd the
+    spec was not keyed on declines the cwd pair and falls through to the home
+    pair, which turns it into a well-formed path on this machine that simply
+    isn't there. The origin marker is consumed on the way, so a substring
+    search for it comes back clean — the restore reports success while every
+    one of those records points at nothing.
+
+    Takes the transcript *before* rewriting, which is the only place the origin
+    path still exists losslessly. Recovering it from the restored value would
+    mean reversing the home substitution, and that reversal is a guess: a
+    leading target home may have been rewritten from the origin's or may have
+    been there all along, with no way to tell after the fact. Guessing is the
+    failure this module exists to stop, so the caller is handed the real string
+    instead. `restored` is derived by putting each cwd through the same spec,
+    so it is what the file on disk actually says.
+
+    Non-empty does not always mean a bug: a session that genuinely moved
+    between directories has records only one of which any single target cwd can
+    satisfy. It always means the restored transcript is partly wrong about the
+    filesystem, which is what a caller needs to know.
+    """
+    found: dict[str, ForeignCwd] = {}
+    for cwd, count in transcript_cwds(raw).items():
+        restored = rewrite_transcript(cwd, spec)
+        if restored != spec.target_cwd:
+            found[cwd] = ForeignCwd(count=count, restored=restored)
+    return found

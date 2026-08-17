@@ -12,6 +12,7 @@ from lochy.claude import (
     read_session_meta,
     resolve_cwd,
     session_dir_for,
+    transcript_cwds,
     transcript_path_for,
 )
 from lochy.redact import Redaction, RedactionError
@@ -131,6 +132,119 @@ def test_ignores_a_transcript_with_no_cwd(tmp_path: Path) -> None:
     path = tmp_path / "empty.jsonl"
     path.write_text('{"type":"user"}\n', encoding="utf-8")
     assert read_session_meta(str(path)) is None
+
+
+# A session that moved: it began in the main repo and continued in a worktree
+# after the agent switched, so the records from before the move stay in the file
+# and the first several hundred name a directory the session has left. Claude
+# files the transcript under the cwd it ended in.
+MAIN = "/Users/mike/apps/harness"
+WORKTREE = "/Users/mike/apps/harness-worktrees/feat/send"
+
+
+def write_moved_session(
+    home: Path,
+    session_id: str = "abc",
+    left: str = MAIN,
+    filed_under: str = WORKTREE,
+    stale: int = 300,
+) -> Path:
+    def record(cwd: str, branch: str, text: str) -> str:
+        return json.dumps(
+            {
+                "type": "user",
+                "sessionId": session_id,
+                "cwd": cwd,
+                "gitBranch": branch,
+                "version": "1.0.99",
+                "message": {"role": "user", "content": text},
+            }
+        )
+
+    directory = Path(session_dir_for(filed_under, str(home)))
+    directory.mkdir(parents=True, exist_ok=True)
+    lines = [record(left, "main", "started here") for _ in range(stale)]
+    lines.append(record(filed_under, "feat/send", "moved here"))
+    path = directory / f"{session_id}.jsonl"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def test_prefers_the_cwd_the_project_directory_is_named_after(tmp_path: Path) -> None:
+    """The first record's cwd is stale, and the live one first appears well past
+    any fixed scan window, so the directory is the only disambiguator."""
+    path = write_moved_session(tmp_path)
+
+    meta = read_session_meta(str(path))
+
+    assert meta is not None
+    assert meta.cwd == WORKTREE
+    assert meta.other_cwds == (MAIN,)
+
+
+def test_branch_is_read_alongside_the_chosen_cwd(tmp_path: Path) -> None:
+    """A branch from a directory the session has left is the same defect as the
+    stale cwd, and it decides which index entry the bundle is filed under."""
+    path = write_moved_session(tmp_path)
+
+    meta = read_session_meta(str(path))
+
+    assert meta is not None
+    assert meta.git_branch == "feat/send"
+
+
+def test_a_moved_session_is_listed_under_the_branch_it_ended_on(
+    tmp_path: Path,
+) -> None:
+    write_moved_session(tmp_path)
+
+    assert [
+        meta.session_id
+        for meta in list_sessions(cwd=WORKTREE, branch="feat/send", home=str(tmp_path))
+    ] == ["abc"]
+    assert list_sessions(cwd=WORKTREE, branch="main", home=str(tmp_path)) == []
+
+
+def test_falls_back_to_the_first_cwd_when_the_directory_matches_nothing(
+    tmp_path: Path,
+) -> None:
+    """A hand-copied transcript or a renamed directory keeps the old behaviour
+    rather than dropping the session."""
+    directory = tmp_path / "unrelated"
+    directory.mkdir(parents=True)
+    path = directory / "abc.jsonl"
+    path.write_text(
+        "\n".join(
+            [
+                json.dumps({"cwd": MAIN, "gitBranch": "main"}),
+                json.dumps({"cwd": WORKTREE, "gitBranch": "feat/send"}),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    meta = read_session_meta(str(path))
+
+    assert meta is not None
+    assert meta.cwd == MAIN
+    assert meta.other_cwds == (WORKTREE,)
+
+
+def test_transcript_cwds_counts_only_the_top_level_field() -> None:
+    """`"cwd"` also occurs inside tool inputs and results — lochy's own --json
+    output among them — where it names some other process's directory."""
+    raw = "\n".join(
+        [
+            json.dumps(
+                {"cwd": MAIN, "toolUseResult": json.dumps({"cwd": "/elsewhere"})}
+            ),
+            json.dumps({"cwd": MAIN}),
+            "",
+            "not json at all",
+        ]
+    )
+
+    assert transcript_cwds(raw) == {MAIN: 2}
 
 
 def test_lists_and_filters_sessions(tmp_path: Path) -> None:

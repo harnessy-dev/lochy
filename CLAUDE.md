@@ -92,8 +92,37 @@ public API. Re-verify if something breaks.
 - Absolute paths are pervasive: a real session had 1440 occurrences of
   the origin home directory across 64% of its lines, inside tool inputs
   and results. Rewriting is a whole-transcript operation.
+- **A session can hold more than one `cwd`, and more than one
+  `gitBranch`.** When the agent moves — into a worktree, say — the cwd
+  changes and every record from before the move stays in the file. The
+  transcript is filed under the directory it *ends* in, so the first
+  record's cwd can be stale, and stale by a long way: in the session this
+  was found on, records 5–295 named the main repo on `main` and records
+  300–1245 named the worktree on `feat/send-worktree-to-remote`. The runs
+  are contiguous and the live one is last.
+- `encode_path` of the live cwd equals the containing directory's name
+  exactly, and the stale one's does not. **The directory is the
+  disambiguator**, and the only one available — no field marks which cwd
+  is current.
+- `"cwd"` also appears *inside* tool inputs and results, naming some
+  other process's directory. lochy's own `--json` output is one such
+  source, so anything counting cwds has to parse each record and read the
+  top-level field, not grep the text.
 - Scale reference: 750MB across 428 project dirs on one active machine;
-  largest single session 1.8MB. Per-branch bundles are a few MB gzipped.
+  largest single session 3.4MB. Per-branch bundles are a few MB gzipped.
+  Parsing every line of that 3.4MB session costs ~11ms and listing its
+  whole project directory (7 sessions) ~17ms.
+- **Multi-cwd sessions are rare and concentrated where it hurts.** Across
+  661 sessions belonging to one machine's repos, 7 (1.1%) held more than
+  one cwd and exactly 1 had its live cwd past line 200. That one is the
+  longest and most-compacted session in the set — 1245 lines, several
+  context compactions — and it is the compaction preamble that pushes the
+  real cwd down the file. So the defect concentrates in long-lived
+  sessions, which are precisely the ones worth moving between machines,
+  and it grows as sessions get longer. That distribution is the argument
+  for the project-directory disambiguator over any larger window: a
+  bigger window is a bet on a bound that the worst cases are the likeliest
+  to break.
 
 ## Layout
 
@@ -146,6 +175,56 @@ before the bundle, since the entries are derived from it and losing the
 bundle first would strand them. `Store.delete` on an absent key succeeds,
 which is what lets either repair run.
 
+`claude.py` decides **which** cwd a session gets, and everything in
+`rewrite.py` is downstream of that answer: `SessionMeta.cwd` becomes the
+bundle manifest's cwd and then `RewriteSpec.origin_cwd`, so one wrong
+value poisons the whole rewrite. Because a session can hold several cwds
+(see above), it is chosen by comparing `encode_path` of each against the
+name of the directory the transcript is filed under. **The encoding is
+only ever compared here, never decoded** — it is lossy, so `<repo>/sub`
+and `<repo>-sub` produce the same slug, which makes a match strong
+evidence and a mismatch conclusive. That asymmetry is the whole safety
+argument. Nothing matching — a hand-copied transcript, a renamed
+directory — falls back to the first cwd rather than dropping the session.
+
+`gitBranch` is stale in exactly the same way and decides which index entry
+a bundle is filed under, so branch and version are read from the records
+carrying the *chosen* cwd rather than from whichever record came first. A
+branch taken from a directory the session has left is the same defect
+wearing a different hat: the real session was reported on `main` when it
+had spent 726 of its records on `feat/send-worktree-to-remote`, which
+filed it under a branch nobody would look for it on.
+
+The scan for cwd is deliberately **unbounded** where the rest of the
+metadata scan used to be capped at 200 lines. The cap was the bug: the
+live cwd first appeared at record 300, so no window wide enough to be
+correct is a window at all. The cwds a session left are kept as
+`SessionMeta.other_cwds` and surfaced as `otherCwds`, since a session
+spanning two directories is something to know before shipping it, not
+after.
+
+**That is a real cost and it was paid knowingly.** `list` now parses
+every line of every session in a project directory. On the worst
+directory on one machine — 5197 sessions, 133MB — it went from ~5.8s to
+~6.5s best-of-three, with noisier runs nearer 8s; 10–45% depending on
+cache state.
+
+Three measurements say don't buy it back with a window. **The scan depth
+is not where it went**: parsing all 5197 sessions whole takes 0.42s,
+against 0.76s for a 200-line window of each — the window is *slower*,
+because those sessions average 12 lines, it never binds, and slicing the
+line list costs more than it saves. **The obvious optimisation does
+nothing**: skipping `json.loads` on lines with no `"cwd"` substring
+measured 0.43s against 0.42s, a wash, since 58% of lines carry one and
+the search is paid on all of them. So the regression is per-file overhead
+— stat, read, summary redaction — and the residue of building three dicts
+where the old loop broke out after one line. **And the directory is a
+pathological outlier**: the next largest holds 281 sessions.
+
+Optimise the per-file path if this ever matters. Reinstating a cap would
+buy back a fraction of a second on one anomalous directory in exchange
+for being silently wrong again.
+
 `rewrite.py` is where correctness actually lives. It does a **single
 left-to-right pass** with longest-match-first alternation, so a
 substitution's output can never be re-matched by a later pair. The hazard
@@ -173,6 +252,91 @@ silently**. So the real-path guard rejects only what could continue a
 filename (`[A-Za-z0-9._-]`) and allows every other follower, since a
 transcript ends a path with `"`, `\`, `:`, `,`, a space or a newline far
 more often than with `/`.
+
+That "fails loudly" holds only for the failure it describes — a path that
+*keeps* an origin marker. It does not hold in general, and assuming it did
+cost a downstream consumer a restore that was 76% wrong while reporting
+success. `residual_origin_paths` is a substring search for `origin_cwd`
+and `origin_home`, so it is blind to any path that came out wrong *and*
+well-formed. The way that happens: give the spec the wrong `origin_cwd`
+and the records naming the right one decline the cwd pair (correctly — the
+boundary guard is doing its job), fall through to the home pair, and
+become a path on this machine that simply isn't there. The origin marker
+is consumed on the way out, so the search comes back empty.
+
+`foreign_cwds` is the check that isn't blind to it. It asks the rewritten
+transcript what directory its records think they are in and reports
+anything that isn't `target_cwd`, with counts — after a rewrite that
+worked, every record names the target, so a clean result is real evidence
+rather than the absence of one marker. It reads the top-level `cwd` field
+per record, not a substring: `"cwd"` occurs inside tool output too, and a
+detector that cries wolf gets ignored. **This is the field to gate on**;
+`residual_origin_paths` remains necessary and is nowhere near sufficient.
+
+Non-empty is not always a bug. A session that genuinely moved between
+directories has records that no single target cwd can satisfy, since only
+one directory is being restored into. It always means the restored
+transcript is partly wrong about the filesystem, which is the thing a
+caller needs to know, so it is reported rather than papered over: those
+records keep whatever the home pair made of them (a plausible sibling on
+the destination) and are counted in `foreignCwds`.
+
+It reads the transcript **before** rewriting, and that is the whole
+reason the entry is keyed on the origin path. A caller's next move is to
+state a mapping for the directory that came out wrong, and the origin
+path is that mapping's left-hand side — but it survives losslessly only
+on the input. Recovering it from the restored value means assuming a
+leading target home was rewritten from the origin's rather than having
+been there all along: right most of the time, silently wrong otherwise,
+undetectable when wrong. Handing a caller a guess to fix a guessing bug
+would reproduce the defect this whole area exists to remove. `restored`
+comes from putting each cwd through the same spec, so both facts are
+given and neither is inferred.
+
+**Leaving foreign cwds unrewritten is possible — it is just not better.**
+The obvious objection, that it needs knowing which subtrees exist on the
+destination, does not apply: lochy has the exact set of candidate cwds
+already, having computed them to choose one, and those specific strings
+are known to be session working directories rather than dotfile or config
+references. So the rule "the home pair declines a value exactly equal to
+a known non-chosen session cwd" is an exact match against a small known
+set, needs nothing from the far side, and fits the single pass — an
+identity pair sorts ahead of the shorter home pair by length, matches,
+and consumes the string, so the home pair never sees it.
+`_apply_replacements` filters identity pairs out via `source != dest` and
+would have to admit them deliberately, which is a small change rather
+than a fight with the design. It is not built because reporting is
+sufficient and `--map` supersedes it: a mapping makes those records
+*correct*, where declining the rewrite only makes them loudly wrong.
+Recorded because "it can't be done" would read later as a closed
+question, and it isn't one.
+
+**`--map <origin>=<target>`, not built, is the intended shape.** A
+repeatable flag on `restore` adding path pairs to the `RewriteSpec`
+alongside the cwd and home ones, so a session that moved between
+directories can have *every* one of them land somewhere real instead of
+one landing right and the rest being counted. It is the natural
+successor to `foreignCwds`: the report tells a caller which directories
+came out wrong, and the flag is how they say what those should become.
+Nothing in `rewrite.py` needs to change to accept it — pairs already
+carry their own boundary guard and are already sorted longest-first, and
+**that sort must keep being by length rather than by caller order**: the
+single-pass guarantee depends on a nested path matching before the
+shorter prefix that contains it, and caller order is arbitrary. This is
+a "keep doing that" note, not a change.
+
+What makes it safe is that **the caller states the mapping; lochy never
+infers it.** The first consumer (Harness "send worktree to remote") can
+name all four paths without a guess: the origin worktree is what the
+user selected, the origin repo root comes from
+`git rev-parse --path-format=absolute --git-common-dir` stripped of its
+`.git` tail, the destination worktree is what `addWorktree` returns, and
+the destination repo root is a required argument on the caller because
+it is the one value nothing on either side can derive. Note the
+destination worktree must be `realpath`'d: git reports canonical paths,
+so `/tmp/...` comes back as `/private/tmp/...` and a lookup keyed on the
+uncanonical form silently misses. That is the same symlink resolution
+`claude.py` does, for the same reason.
 
 The encoded slug takes a stricter rule for a reason that can't be fixed:
 `encode_path` maps every non-alphanumeric to `-`, so `<repo>/sub` and
@@ -318,6 +482,18 @@ The `list --remote` payload is deliberately *not* `index.py`'s stored entry
 shape even though the fields line up. One is a storage format, the other is
 a versioned wire contract, and they change for different reasons.
 
+**A partly-wrong restore is reported, not failed.** `restore` carries
+`foreignCwds` per session — `{"<path>": <count>}` of directories the
+rewritten transcript still names other than the one it was restored into.
+It is the field to gate on, because `residualOriginPaths` cannot see the
+failure it exists for (above). It stays a warning rather than a `code`:
+a session that genuinely moved between directories has records no target
+cwd can satisfy, and refusing the restore would help nobody. The text
+renderer prints both, and the prose warning is stderr-only as usual, so
+JSON mode carries the same fact as a payload field and leaves stderr
+empty. `save` and `list` carry the same signal ahead of time as
+`otherCwds`.
+
 **Never the matched text.** Redaction is reported as `{"<rule>": <count>}`
 plus a `redacted` total, exactly as much as the prose summary carries and no
 more — `save`'s stdout lands in the next agent's transcript. The one field
@@ -388,10 +564,48 @@ different machine (foreign home and repo path), restored into a
 different directory with the original deleted so there was no fallback,
 and resumed — it recalled content from the original conversation.
 
+The multi-cwd fix is verified against the real session it was found on:
+`save` now packs it under the worktree it ended in and indexes it under
+`feat/send-worktree-to-remote` (it was packing the main repo and indexing
+`main`), a cross-machine restore rewrites all 726 worktree records to the
+target, and the 194 records from before the move are reported as
+`foreignCwds` with `residualOriginPaths` still empty — which is precisely
+the pair of facts the old output could not distinguish from success. The
+regression tests fail against the previous selection rule, checked by
+reverting it.
+
+The same staleness had a second victim that was not in the brief:
+`gitBranch`. It was read from the first record too, so that session
+reported `main` and was filed under `index/branch/main` while 726 of its
+records were on `feat/send-worktree-to-remote`. Branch and version are
+now read from records carrying the *chosen* cwd. This is worth its own
+release note rather than folding into the cwd fix, because the blast
+radius is different: a consumer that carries the branch itself sees a
+healthy-looking transfer while the lochy entry sits under a name nobody
+would look for it on, and every already-saved bundle from a moved session
+is filed wrong until re-saved or reindexed.
+
+Those 194 records are the honest limit. They name a directory that really
+is different, so they keep whatever the home pair made of them and are
+counted rather than corrected. `--map` (above) is what would make them
+correct rather than merely visible; nothing needs it yet.
+
+`otherCwds` and `foreignCwds` are new payload fields, so no `schema` bump
+— but the first consumer (Harness "send worktree to remote") was reading
+`residualOriginPaths` as its success signal and needs telling that the
+field it wants is `foreignCwds`. Its shape is
+`{"<origin path>": {"count": N, "restored": "<path on this machine>"}}`,
+keyed on the origin deliberately (above) — it was `{"<path>": <count>}`
+briefly and was changed before anything consumed it.
+
 Nothing currently pins the bundle format. The two constraints above —
 compact separators and omitted-not-null metadata — are held by prose
 rather than by a test, so a well-meaning refactor could change every
-ref the format produces without failing the suite.
+ref the format produces without failing the suite. Note that
+`SessionMeta.other_cwds` is deliberately *not* packed into the bundle:
+the transcript is the source of truth for what directories it names, and
+adding a field would change the ref of every bundle for a value the
+restore side can recompute.
 
 **The S3 backend has still never run against a real bucket.** It has moto
 coverage now, which is more than it had, but mocks agree with your
@@ -434,9 +648,11 @@ CI and no release, so the first tag push is also the first execution of the
 release path. No release exists yet, so the wheel URL in the README points at
 a `v0.1.0` that has to be cut before it resolves.
 
-Also missing: any other index dimension (`cwd` is the obvious next one,
-and the layout takes it without a migration), any git integration (no
-notes, no PR-level pointers), and no adapters beyond Claude Code.
+Also missing: `restore --map` (design intent recorded above, deliberately
+not built on this branch), any other index dimension (`cwd` is the
+obvious next one, and the layout takes it without a migration), any git
+integration (no notes, no PR-level pointers), and no adapters beyond
+Claude Code.
 `restore` still needs a full 64-character ref — the index makes refs
 discoverable, but nothing resolves a prefix.
 

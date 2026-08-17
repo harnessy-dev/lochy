@@ -6,10 +6,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from test_claude import SECRET, write_session
+from test_claude import SECRET, write_moved_session, write_session
 
 from lochy.bundle import unpack_bundle
-from lochy.claude import session_dir_for, transcript_path_for
+from lochy.claude import session_dir_for, transcript_cwds, transcript_path_for
 from lochy.cli import main
 
 
@@ -751,6 +751,71 @@ def test_json_restore_reports_residual_origin_paths(
 
     (session,) = document["sessions"]
     assert session["residualOriginPaths"] == [str(project.resolve())]
+
+
+def test_a_moved_session_is_saved_and_restored_from_the_cwd_it_ended_in(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """The whole failure, end to end. A session that began in the main repo and
+    moved into a worktree used to be saved under the repo it had left, which
+    keyed the rewrite on the wrong cwd: every worktree record then declined the
+    cwd pair, fell through to the home pair, and landed on a well-formed path
+    that exists nowhere. residualOriginPaths stayed empty throughout, which is
+    why foreignCwds is the field a caller can gate on."""
+    origin_home = tmp_path / "origin-home"
+    main = origin_home / "apps" / "harness"
+    worktree = origin_home / "apps" / "harness-worktrees" / "feat" / "send"
+    worktree.mkdir(parents=True)
+    main.mkdir(parents=True)
+    store = tmp_path / "store"
+    write_moved_session(origin_home, "abc", str(main), str(worktree), stale=300)
+
+    saved, _, _ = invoke_json(
+        monkeypatch,
+        capsys,
+        origin_home,
+        "save",
+        "--json",
+        "--cwd",
+        str(worktree),
+        "--store",
+        str(store),
+    )
+
+    (packed,) = saved["sessions"]
+    assert packed["cwd"] == str(worktree)
+    assert packed["branch"] == "feat/send"
+    assert [entry["value"] for entry in saved["indexed"]] == ["feat/send"]
+
+    target_home = tmp_path / "target-home"
+    target = target_home / "apps" / "harness-worktrees" / "feat" / "send"
+    target.mkdir(parents=True)
+
+    document, err, _ = invoke_json(
+        monkeypatch,
+        capsys,
+        target_home,
+        "restore",
+        "--json",
+        saved["ref"],
+        "--into",
+        str(target),
+        "--store",
+        str(store),
+    )
+
+    (session,) = document["sessions"]
+    assert session["status"] == "restored"
+    assert err == ""
+
+    restored = Path(session["path"]).read_text(encoding="utf-8")
+    assert transcript_cwds(restored)[str(target)] == 1
+    # The records from before the move name a genuinely different directory, so
+    # no single target cwd can satisfy them. They are reported, not hidden.
+    assert session["residualOriginPaths"] == []
+    assert session["foreignCwds"] == {
+        str(main): {"count": 300, "restored": str(target_home / "apps" / "harness")}
+    }
 
 
 def test_json_restore_reports_a_skip_as_status_not_as_stderr_prose(

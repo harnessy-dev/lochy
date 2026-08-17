@@ -1,6 +1,12 @@
 import json
 
-from lochy.rewrite import RewriteSpec, residual_origin_paths, rewrite_transcript
+from lochy.rewrite import (
+    ForeignCwd,
+    RewriteSpec,
+    foreign_cwds,
+    residual_origin_paths,
+    rewrite_transcript,
+)
 
 CROSS_MACHINE = RewriteSpec(
     origin_cwd="/Users/mike/proj",
@@ -166,6 +172,61 @@ def test_rewrites_the_encoded_slug_only_as_a_complete_component() -> None:
 
     assert "projects/-Users-alice-work-proj/abc.jsonl" in out
     assert "projects/-Users-mike-proj-worktrees-feat-send/d.jsonl" in out
+
+
+def test_foreign_cwds_is_empty_when_every_record_reaches_the_target() -> None:
+    assert foreign_cwds(dumps({"cwd": "/Users/mike/proj"}), CROSS_MACHINE) == {}
+
+
+def test_foreign_cwds_catches_what_residual_paths_cannot_see() -> None:
+    """The failure that reported success: a cwd the spec was not keyed on
+    declines the cwd pair, falls through to the home pair, and lands as a
+    well-formed path on this machine that isn't there. The origin marker is
+    consumed on the way, so residual_origin_paths comes back clean."""
+    raw = "\n".join(
+        [
+            dumps({"cwd": "/Users/mike/proj"}),
+            dumps({"cwd": "/Users/mike/other"}),
+            dumps({"cwd": "/Users/mike/other"}),
+        ]
+    )
+
+    out = rewrite_transcript(raw, CROSS_MACHINE)
+
+    assert "/Users/alice/other" in out
+    assert residual_origin_paths(out, CROSS_MACHINE) == []
+    assert foreign_cwds(raw, CROSS_MACHINE) == {
+        "/Users/mike/other": ForeignCwd(count=2, restored="/Users/alice/other")
+    }
+
+
+def test_foreign_cwds_keys_on_the_origin_rather_than_a_reversal() -> None:
+    """The origin path is the left-hand side of any mapping a caller states,
+    and it survives losslessly only before the rewrite. Recovering it from the
+    restored value would mean assuming a leading target home came from the
+    origin's — right most of the time, silently wrong otherwise, which is the
+    failure this branch exists to stop."""
+    raw = dumps({"cwd": "/Users/mike/other"})
+
+    (origin,) = foreign_cwds(raw, CROSS_MACHINE)
+
+    assert origin == "/Users/mike/other"
+    assert origin in raw
+    assert origin not in rewrite_transcript(raw, CROSS_MACHINE)
+
+
+def test_foreign_cwds_ignores_a_cwd_nested_in_tool_output() -> None:
+    """`"cwd"` also appears inside tool results — lochy's own --json output
+    among them — where it names some other process's directory. Counting those
+    would fire on a restore that was entirely correct."""
+    raw = dumps(
+        {
+            "cwd": "/Users/mike/proj",
+            "toolUseResult": dumps({"cwd": "/somewhere/else"}),
+        }
+    )
+
+    assert foreign_cwds(raw, CROSS_MACHINE) == {}
 
 
 def test_still_rewrites_a_path_at_every_ordinary_terminator() -> None:

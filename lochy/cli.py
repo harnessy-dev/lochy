@@ -9,7 +9,7 @@ import time
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, NoReturn
 
@@ -46,7 +46,13 @@ from .index import (
 )
 from .output import JSON_FLAG, CommandError, Result, emit, emit_error
 from .redact import RedactionError, redact, summarize
-from .rewrite import RewriteSpec, residual_origin_paths, rewrite_transcript
+from .rewrite import (
+    ForeignCwd,
+    RewriteSpec,
+    foreign_cwds,
+    residual_origin_paths,
+    rewrite_transcript,
+)
 from .store import MissingDependency, MissingObject, create_store, resolve_store_uri
 
 USAGE = """lochy — save and restore agent coding sessions across machines
@@ -169,6 +175,7 @@ def _session_payload(meta: SessionMeta) -> dict[str, Any]:
         "sessionId": meta.session_id,
         "path": meta.path,
         "cwd": meta.cwd,
+        "otherCwds": list(meta.other_cwds),
         "branch": meta.git_branch,
         "claudeVersion": meta.claude_version,
         "bytes": meta.bytes,
@@ -384,6 +391,7 @@ class RestoredSession:
     path: str
     residual_origin_paths: tuple[str, ...]
     resume_command: str | None
+    foreign_cwds: dict[str, ForeignCwd] = field(default_factory=dict)
 
 
 def command_restore(argv: list[str]) -> Result:
@@ -454,6 +462,8 @@ def command_restore(argv: list[str]) -> Result:
                 resume_command=(
                     f"cd {target_cwd} && claude --resume {target_session_id}"
                 ),
+                # Pre-rewrite: the origin path only exists losslessly here.
+                foreign_cwds=foreign_cwds(session.transcript, spec),
             )
         )
 
@@ -472,6 +482,11 @@ def command_restore(argv: list[str]) -> Result:
         f"  skipped {session.session_id} (already exists; --force to overwrite)\n"
         for session in restored
         if session.status == "skipped"
+    ) + tuple(
+        f"  {session.session_id} worked in {origin} for {foreign.count} record(s), "
+        f"which no rewrite into {target_cwd} can satisfy\n"
+        for session in restored
+        for origin, foreign in session.foreign_cwds.items()
     )
 
     if not any(session.status == "restored" for session in restored):
@@ -493,6 +508,12 @@ def _restored_payload(session: RestoredSession) -> dict[str, Any]:
         "status": session.status,
         "path": session.path,
         "residualOriginPaths": list(session.residual_origin_paths),
+        # Keyed by the origin path, which is the left-hand side a caller states
+        # a mapping with; `restored` is what the file on disk actually says.
+        "foreignCwds": {
+            origin: {"count": foreign.count, "restored": foreign.restored}
+            for origin, foreign in session.foreign_cwds.items()
+        },
         "resumeCommand": session.resume_command,
     }
 
@@ -507,6 +528,11 @@ def _restore_text(bundle: Bundle, restored: list[RestoredSession]) -> str:
         lines.append(
             f"  restored {session.session_id} [{session.branch or 'no branch'}]{note}\n"
         )
+        for origin, foreign in session.foreign_cwds.items():
+            lines.append(
+                f"    {foreign.count} record(s) worked in {origin}, "
+                f"now {foreign.restored}\n"
+            )
     lines.append(
         f"\nfrom {bundle.origin.hostname} ({bundle.origin.home})\nresume with:\n"
     )

@@ -1,6 +1,7 @@
 import json
 import os
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,8 +10,6 @@ from typing import Any
 from .redact import RedactionError, redact
 
 AGENT = "claude-code"
-
-METADATA_SCAN_LINES = 200
 
 SUMMARY_LIMIT = 120
 
@@ -25,6 +24,10 @@ class SessionMeta:
     bytes: int
     modified_at: str
     summary: str | None
+    # Directories the session also worked in before it moved. A restore has one
+    # target cwd, so records naming these cannot be made correct on the far
+    # side; surfacing them here is the only honest option.
+    other_cwds: tuple[str, ...] = ()
 
 
 def home_dir() -> str:
@@ -73,6 +76,54 @@ def _first_string(value: Any) -> str | None:
     return value if isinstance(value, str) and value and value != "-" else None
 
 
+def _records(raw: str) -> Iterator[dict[str, Any]]:
+    for line in raw.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict):
+            yield record
+
+
+def transcript_cwds(raw: str) -> dict[str, int]:
+    """Every cwd a transcript's records name, with how many name it, in order
+    of first appearance. Only the top-level field counts: `"cwd"` also occurs
+    inside tool inputs and results — lochy's own --json output among them —
+    where it names some other process's directory."""
+    counts: dict[str, int] = {}
+    for record in _records(raw):
+        cwd = _first_string(record.get("cwd"))
+        if cwd:
+            counts[cwd] = counts.get(cwd, 0) + 1
+    return counts
+
+
+def cwd_for_directory(cwds: list[str], directory: str) -> str:
+    """Which of a session's cwd values the transcript is actually filed under.
+
+    A session holds more than one whenever the agent moves mid-session — into a
+    worktree, say — because the records from before the move stay in the file.
+    The first one can be hundreds of lines stale, and it is the one a restore
+    would otherwise rewrite from. Claude names the containing directory after
+    the *current* cwd, which makes the directory the disambiguator.
+
+    The encoding is only ever compared here, never decoded. encode_path maps
+    every non-alphanumeric to `-`, so `<repo>/sub` and `<repo>-sub` produce the
+    same slug: a match is strong evidence, a mismatch is conclusive. That
+    asymmetry is what makes this safe. Nothing matching — a hand-copied
+    transcript, a renamed directory — falls back to the first cwd, which is the
+    behaviour this replaced.
+    """
+    for cwd in cwds:
+        if encode_path(cwd) == directory:
+            return cwd
+    return cwds[0]
+
+
 def _extract_summary(record: dict[str, Any]) -> str | None:
     if record.get("type") != "user":
         return None
@@ -110,50 +161,48 @@ def read_session_meta(path: str) -> SessionMeta | None:
     except OSError:
         return None
 
-    lines = raw.split("\n")
     session_id = re.sub(r"\.jsonl$", "", path.split("/")[-1])
-    cwd: str | None = None
-    git_branch: str | None = None
-    claude_version: str | None = None
+    counts: dict[str, int] = {}
+    branches: dict[str, str] = {}
+    versions: dict[str, str] = {}
     summary: str | None = None
 
-    for line in lines[:METADATA_SCAN_LINES]:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            record = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(record, dict):
-            continue
-        cwd = cwd if cwd is not None else _first_string(record.get("cwd"))
-        git_branch = (
-            git_branch
-            if git_branch is not None
-            else _first_string(record.get("gitBranch"))
-        )
-        claude_version = (
-            claude_version
-            if claude_version is not None
-            else _first_string(record.get("version"))
-        )
-        summary = summary if summary is not None else _extract_summary(record)
-        if cwd and git_branch and claude_version and summary:
-            break
+    # Whole file rather than a bounded window: the cwd the session is filed
+    # under can first appear hundreds of records in, so a window deep enough to
+    # be correct is no window at all. Only the branch and version are read per
+    # cwd, which costs one dict lookup on a line already being parsed.
+    for record in _records(raw):
+        cwd = _first_string(record.get("cwd"))
+        if cwd:
+            counts[cwd] = counts.get(cwd, 0) + 1
+            branch = _first_string(record.get("gitBranch"))
+            if branch and cwd not in branches:
+                branches[cwd] = branch
+            version = _first_string(record.get("version"))
+            if version and cwd not in versions:
+                versions[cwd] = version
+        if summary is None:
+            summary = _extract_summary(record)
 
-    if not cwd:
+    if not counts:
         return None
+
+    ordered = list(counts)
+    cwd = cwd_for_directory(ordered, os.path.basename(os.path.dirname(path)))
 
     return SessionMeta(
         session_id=session_id,
         path=path,
         cwd=cwd,
-        git_branch=git_branch,
-        claude_version=claude_version,
+        # Read alongside the chosen cwd. A branch from a record the session has
+        # since moved away from is the same defect as the stale cwd, and it
+        # decides which index entry the bundle gets filed under.
+        git_branch=branches.get(cwd),
+        claude_version=versions.get(cwd) or next(iter(versions.values()), None),
         bytes=stat.st_size,
         modified_at=iso_timestamp(stat.st_mtime),
         summary=_display_summary(summary),
+        other_cwds=tuple(other for other in ordered if other != cwd),
     )
 
 
