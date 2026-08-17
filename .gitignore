@@ -8,3 +8,4 @@ dist/
 *.loch
 !test/fixtures/*.loch
 .DS_Store
+.claude/settings.local.json
