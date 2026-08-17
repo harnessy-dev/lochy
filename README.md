@@ -16,14 +16,14 @@ Currently supports Claude Code.
 ## Install
 
 ```sh
-uv tool install https://github.com/harnessy-dev/lochy/releases/download/v0.1.0/lochy-0.1.0-py3-none-any.whl
+uv tool install https://github.com/ness-dev/lochy/releases/download/v0.1.0/lochy-0.1.0-py3-none-any.whl
 lochy --version
 ```
 
 The wheel is `py3-none-any`, and [uv](https://docs.astral.sh/uv/) is a static
 binary that brings its own CPython, so this needs no Python on the machine and
 no PyPI account behind it. Releases are attached to
-[GitHub releases](https://github.com/harnessy-dev/lochy/releases) as a wheel
+[GitHub releases](https://github.com/ness-dev/lochy/releases) as a wheel
 and an sdist.
 
 Python 3.10 or newer if you'd rather install it yourself — `pipx install`,
@@ -34,7 +34,7 @@ in. The backend imports boto3 lazily, so a `file://` store never loads it and
 paying 27MB for a dependency most installs never reach isn't worth it:
 
 ```sh
-uv tool install "lochy[s3] @ https://github.com/harnessy-dev/lochy/releases/download/v0.1.0/lochy-0.1.0-py3-none-any.whl"
+uv tool install "lochy[s3] @ https://github.com/ness-dev/lochy/releases/download/v0.1.0/lochy-0.1.0-py3-none-any.whl"
 ```
 
 Without it, an `s3://` store fails with `code: "s3-extra-missing"` rather than

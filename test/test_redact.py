@@ -95,7 +95,7 @@ def test_ordinary_transcript_content_survives_untouched() -> None:
             line(message="I refactored rewrite.py to keep the single-pass property."),
             line(commit="c4056e9a1f2b3c4d5e6f708192a3b4c5d6e7f809"),
             line(uuid="3f2a1b4c-5d6e-4f70-8192-a3b4c5d6e7f8"),
-            line(note="see https://github.com/harnessy-dev/lochy for the source"),
+            line(note="see https://github.com/ness-dev/lochy for the source"),
             line(usage={"input_tokens": 12345678, "output_tokens": 4096}),
             line(path="~/.claude/projects/-Users-mike-proj/abc.jsonl"),
             line(sha256="a" * 64),
